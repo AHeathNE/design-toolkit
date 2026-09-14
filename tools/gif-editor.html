@@ -964,6 +964,7 @@
   const state = {
     width:0, height:0,
     sourceCanvases: [],   // per source frame, full-size canvas of raw decoded pixels (immutable per load)
+    sourceHasTransparency: false, // true if the loaded GIF itself has any transparent pixels
     delays: [],           // per source frame, ms
     baseFrames: [],       // per source frame, full-size canvas AFTER adjust/posterize/bitmap/mask (recomputed on those changes)
     crop: { x:0, y:0, w:0, h:0 },
@@ -1060,6 +1061,11 @@
         state.width = gif.width;
         state.height = gif.height;
         state.delays = gif.frames.map(f => f.delay);
+        state.sourceHasTransparency = gif.frames.some(f => {
+          const d = f.composited;
+          for(let p=3;p<d.length;p+=4) if(d[p] !== 255) return true;
+          return false;
+        });
         state.sourceCanvases = gif.frames.map(f => {
           const c = document.createElement("canvas");
           c.width = gif.width; c.height = gif.height;
@@ -1727,6 +1733,12 @@
       const colorCount = parseInt(val("colors").value, 10);
       const scalePct = parseInt(val("outScale").value, 10) / 100;
       const framePct = parseInt(val("outFrames").value, 10) / 100;
+      // Either the user's own Mask tool or transparency already present in
+      // the source GIF needs the same chroma-key treatment below — gif.js
+      // discards the alpha channel entirely, so any transparent pixel has
+      // to be recolored to KEY_COLOR and punched out via gifOpts.transparent,
+      // or it gets encoded as opaque black.
+      const useTransparency = state.mask.enabled || state.sourceHasTransparency;
 
       const c = state.crop;
       const finalW = Math.max(1, Math.round(c.w * scalePct));
@@ -1760,7 +1772,7 @@
         for(let j=start;j<end;j++) delaySum += (state.delays[j] || 100);
         delaySum = Math.max(20, Math.round(delaySum));
 
-        const target = state.mask.enabled ? preSnapCtx : compCtx;
+        const target = useTransparency ? preSnapCtx : compCtx;
         target.clearRect(0,0,finalW,finalH);
         target.drawImage(state.baseFrames[srcIdx], c.x, c.y, c.w, c.h, 0, 0, finalW, finalH);
         state.overlays.forEach(ov => {
@@ -1774,7 +1786,7 @@
         });
         target.globalAlpha = 1;
 
-        if(state.mask.enabled){
+        if(useTransparency){
           // Snap alpha to hard 0/255 (GIF transparency is all-or-nothing),
           // then composite onto the chroma-key background gif.js will punch out.
           const imgData = preSnapCtx.getImageData(0,0,finalW,finalH);
@@ -1801,12 +1813,15 @@
         const totalPixels = composedFrames.length * finalW * finalH;
         const stride = Math.max(1, Math.floor(totalPixels/targetSamples));
         let counter = 0;
+        // The chroma-key fill must survive quantization pixel-for-pixel, or
+        // gif.js's exact-RGB transparency match (below) silently stops working.
+        function isKeyPixel(d,o){ return useTransparency && d[o]===255 && d[o+1]===0 && d[o+2]===255; }
         for(const f of composedFrames){
           const d = f.imageData.data;
           for(let p=0;p<finalW*finalH;p++){
             if(counter % stride === 0){
               const o = p*4;
-              if(d[o+3] > 0) samples.push(d[o], d[o+1], d[o+2]);
+              if(d[o+3] > 0 && !isKeyPixel(d,o)) samples.push(d[o], d[o+1], d[o+2]);
             }
             counter++;
           }
@@ -1822,7 +1837,7 @@
         composedFrames.forEach(f => {
           const d = f.imageData.data;
           for(let o=0; o<d.length; o+=4){
-            if(d[o+3] === 0) continue;
+            if(d[o+3] === 0 || isKeyPixel(d,o)) continue;
             const c2 = paletteRGB(d[o], d[o+1], d[o+2]);
             d[o]=c2[0]; d[o+1]=c2[1]; d[o+2]=c2[2];
           }
@@ -1836,7 +1851,13 @@
         workers: 3, quality, repeat: loop,
         width: finalW, height: finalH, workerScript: workerUrl
       };
-      if(state.mask.enabled) gifOpts.transparent = KEY_COLOR_NUM;
+      if(useTransparency){
+        gifOpts.transparent = KEY_COLOR_NUM;
+        // Share one color table across all frames so the exact same palette
+        // entry is punched transparent everywhere, instead of gif.js picking
+        // a "closest to magenta" entry independently per frame.
+        gifOpts.globalPalette = true;
+      }
       const gif = new GIF(gifOpts);
       currentGif = gif;
 
