@@ -1,0 +1,1039 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Frame Extractor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.js"></script>
+<style>
+  :root {
+    --bg: #12151a; --panel: #1b1f27; --panel-raised: #232833; --border: #2e3440;
+    --text: #edeff3; --text-dim: #8a93a3; --accent: #e8a33d; --accent-dim: #c6862a;
+    --accent-2: #3fa9a4; --danger: #e0645a; --radius: 10px;
+    --mono: ui-monospace, "SF Mono", Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; padding:0; }
+  body{ background:var(--bg); color:var(--text); font-family:var(--sans); min-height:100vh; padding:32px 16px 64px; }
+  .app-shell{ max-width:720px; margin:0 auto; }
+  header.tool-header{ margin-bottom:24px; }
+  header.tool-header h1{ font-size:1.5rem; font-weight:700; letter-spacing:-0.01em; margin:0 0 6px; }
+  header.tool-header p{ color:var(--text-dim); margin:0; font-size:0.9rem; line-height:1.5; max-width:56ch; }
+  .panel{ background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); padding:20px; }
+  .panel + .panel{ margin-top:16px; }
+
+  .dropzone{ border:1.5px dashed var(--border); border-radius:var(--radius); padding:40px 20px; text-align:center; cursor:pointer; color:var(--text-dim); background:var(--panel); }
+  .dropzone:hover, .dropzone.dragover{ border-color:var(--accent-dim); background:var(--panel-raised); }
+  .dropzone strong{ color:var(--text); font-weight:600; }
+  .dropzone .hint{ font-size:0.82rem; margin-top:8px; color:var(--text-dim); }
+  input[type=file]{ display:none; }
+  .filename{ font-size:0.82rem; color:var(--text-dim); margin-top:8px; word-break:break-all; }
+
+  .meta-row{ display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:12px; font-size:0.82rem; color:var(--text-dim); }
+  .meta-row .value{ color:var(--text); font-family:var(--mono); }
+
+  .preview-wrap{ background:#000; border-radius:8px; overflow:hidden; display:flex; align-items:center; justify-content:center; max-height:320px; }
+  video#video{ width:100%; max-height:320px; display:block; }
+
+  .mode-toggle{ display:flex; gap:8px; margin-bottom:4px; }
+  .mode-btn{ flex:1; font-family:var(--sans); font-weight:600; font-size:0.85rem; padding:10px 12px; border-radius:8px; border:1px solid var(--border); background:var(--panel-raised); color:var(--text-dim); cursor:pointer; }
+  .mode-btn.active{ border-color:var(--accent); color:var(--accent); background:rgba(232,163,61,0.08); }
+  .mode-btn:disabled{ opacity:0.4; cursor:not-allowed; }
+  .mode-note{ font-size:0.78rem; color:var(--text-dim); margin-top:8px; line-height:1.5; }
+
+  h2{ font-size:0.95rem; font-weight:600; margin:0 0 4px; }
+  .section-hint{ color:var(--text-dim); font-size:0.82rem; margin:0 0 14px; line-height:1.5; }
+
+  .row{ display:flex; align-items:center; gap:10px; margin-top:14px; flex-wrap:wrap; }
+  label{ font-size:0.85rem; color:var(--text-dim); }
+  input[type=number]{ background:var(--panel-raised); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:7px 9px; width:90px; font-size:0.9rem; font-family:var(--mono); }
+  input[type=range]{ flex:1; min-width:160px; accent-color:var(--accent); }
+  select{ background:var(--panel-raised); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:7px 9px; font-size:0.9rem; font-family:var(--sans); }
+  .time-readout{ font-variant-numeric:tabular-nums; font-family:var(--mono); font-size:0.85rem; color:var(--text); min-width:48px; text-align:right; }
+
+  .btn{ font-family:var(--sans); font-weight:600; font-size:0.88rem; padding:9px 16px; border-radius:7px; border:1px solid var(--border); background:var(--panel-raised); color:var(--text); cursor:pointer; }
+  .btn:hover{ border-color:var(--accent-dim); }
+  .btn.primary{ background:var(--accent); border-color:var(--accent); color:#1a1206; }
+  .btn.primary:hover{ background:#f0ad50; }
+  .btn:disabled{ opacity:0.45; cursor:not-allowed; }
+  .btn.small{ padding:6px 10px; font-size:0.8rem; }
+  .actions{ display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
+
+  .status{ font-size:0.82rem; color:var(--text-dim); margin-top:10px; min-height:18px; font-family:var(--mono); }
+  .status.error{ color:var(--danger); }
+
+  canvas#previewCanvas{
+    display:block; max-width:100%; border-radius:8px; border:1px solid var(--border); margin-top:4px;
+    background:
+      linear-gradient(45deg,#222 25%,transparent 25%) -8px 0/16px 16px,
+      linear-gradient(-45deg,#222 25%,transparent 25%) -8px 0/16px 16px,
+      linear-gradient(45deg,transparent 75%,#222 75%) -8px 0/16px 16px,
+      linear-gradient(-45deg,transparent 75%,#222 75%) -8px 0/16px 16px, #2c2f38;
+  }
+
+  /* trim timeline (export-clip mode) */
+  .timeline-labels{ display:flex; justify-content:space-between; font-family:var(--mono); font-size:0.82rem; color:var(--accent); margin-bottom:8px; }
+  .timeline{ position:relative; height:40px; display:flex; align-items:center; touch-action:none; }
+  .timeline-track{ position:relative; width:100%; height:6px; background:var(--panel-raised); border-radius:3px; cursor:pointer; }
+  .timeline-fill{ position:absolute; top:0; bottom:0; background:var(--accent); border-radius:3px; opacity:0.85; }
+  .timeline-playhead{ position:absolute; top:-14px; width:2px; height:34px; background:var(--accent-2); pointer-events:none; opacity:0.9; }
+  .timeline-handle{ position:absolute; top:50%; width:16px; height:26px; background:var(--accent); border:2px solid #0d0f13; border-radius:4px; transform:translate(-50%,-50%); cursor:grab; }
+  .timeline-handle:active{ cursor:grabbing; }
+  .transport-row{ display:flex; align-items:center; justify-content:space-between; margin-top:14px; flex-wrap:wrap; gap:10px; }
+  .selection-readout{ font-family:var(--mono); font-size:0.85rem; color:var(--text-dim); }
+  .selection-readout .n{ color:var(--text); }
+
+  .fps-chips{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+  .fps-chip{ font-family:var(--mono); font-size:0.82rem; padding:8px 12px; border-radius:7px; border:1px solid var(--border); background:var(--panel-raised); color:var(--text-dim); cursor:pointer; }
+  .fps-chip.active{ border-color:var(--accent); color:var(--accent); background:rgba(232,163,61,0.08); }
+  .fps-custom{ display:flex; align-items:center; gap:10px; }
+  .fps-result{ margin-top:10px; font-size:0.82rem; color:var(--text-dim); font-family:var(--mono); }
+
+  .export-row{ display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  .progress-track{ flex:1; min-width:140px; height:8px; background:var(--panel-raised); border-radius:4px; overflow:hidden; display:none; }
+  .progress-track.active{ display:block; }
+  .progress-bar{ height:100%; width:0%; background:var(--accent-2); }
+  .download-card{ margin-top:14px; padding:14px; border-radius:8px; background:rgba(63,169,164,0.08); border:1px solid var(--accent-2); display:none; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  .download-card.visible{ display:flex; }
+  .download-card a{ color:var(--accent-2); font-weight:600; text-decoration:none; font-size:0.9rem; }
+  .download-card a:hover{ text-decoration:underline; }
+  .support-note{ margin-top:20px; font-size:0.78rem; color:var(--text-dim); line-height:1.5; }
+
+  .hidden{ display:none !important; }
+  canvas#captureCanvas{ position:fixed; top:0; left:0; width:2px; height:2px; opacity:0.01; pointer-events:none; z-index:-1; }
+</style>
+</head>
+<body>
+<div class="app-shell">
+  <header class="tool-header">
+    <h1>Frame Extractor</h1>
+    <p>Pull a single still frame out of a video or GIF, or trim a video down to a shorter clip — optionally at a lower frame rate, exported as GIF or video. Everything runs in your browser; nothing is uploaded anywhere.</p>
+  </header>
+
+  <div id="dropzone" class="panel dropzone" tabindex="0" role="button" aria-label="Choose a video or GIF file">
+    <div><strong>Drop a video or GIF here</strong>, or click to choose one</div>
+    <div class="hint">Video works best in Chrome or Edge on desktop.</div>
+    <input type="file" id="fileInput" accept="video/*,image/gif">
+    <div class="filename" id="filename"></div>
+  </div>
+
+  <div id="workArea" class="hidden">
+    <div class="panel" id="videoPreviewPanel">
+      <div class="preview-wrap"><video id="video" playsinline muted></video></div>
+      <div class="meta-row">
+        <span>Resolution: <span class="value" id="metaRes">\u2014</span></span>
+        <span>Duration: <span class="value" id="metaDuration">\u2014</span></span>
+        <span id="metaFpsRow">Source frame rate: <span class="value" id="metaFps">\u2014</span></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="mode-toggle">
+        <button class="mode-btn active" id="modeGrabBtn">Grab a frame</button>
+        <button class="mode-btn" id="modeClipBtn">Export a clip</button>
+      </div>
+      <div class="mode-note hidden" id="clipUnavailableNote">
+        Clip export needs a video's playback APIs, so it isn't available for a GIF source. To trim a GIF to a shorter GIF, use the GIF Combiner's Sequence mode instead.
+      </div>
+    </div>
+
+    <!-- ===== GRAB-A-FRAME MODE ===== -->
+    <div class="panel" id="grabPanel">
+      <h2>Scrub to a moment</h2>
+      <p class="section-hint">Drag the slider or jump to an exact time, then grab that frame as a PNG.</p>
+      <div class="row">
+        <input type="range" id="scrub" min="0" max="0" step="0.05" value="0" disabled>
+        <span class="time-readout" id="readout">0.0s</span>
+      </div>
+      <div class="row">
+        <label for="jumpTime">Jump to</label>
+        <input type="number" id="jumpTime" value="0" min="0" step="0.1" disabled>
+        <label>seconds</label>
+      </div>
+      <div class="status" id="grabStatus"></div>
+    </div>
+    <div class="panel" id="grabResultPanel" style="display:none;">
+      <canvas id="previewCanvas"></canvas>
+      <div class="actions">
+        <button class="btn primary" id="downloadPngBtn">Download PNG</button>
+        <button class="btn" id="copyPngBtn">Copy to Clipboard</button>
+      </div>
+    </div>
+
+    <!-- ===== EXPORT-A-CLIP MODE (video only) ===== -->
+    <div class="hidden" id="clipModeSection">
+      <div class="panel">
+        <h2>Trim range</h2>
+        <p class="section-hint">Drag the two handles to set the start and end of the clip you want to keep.</p>
+        <div class="timeline-labels"><span id="labelStart">0:00.0</span><span id="labelEnd">0:00.0</span></div>
+        <div class="timeline">
+          <div class="timeline-track" id="timelineTrack">
+            <div class="timeline-fill" id="timelineFill"></div>
+            <div class="timeline-playhead" id="timelinePlayhead"></div>
+            <div class="timeline-handle" id="handleStart" tabindex="0" role="slider" aria-label="Trim start"></div>
+            <div class="timeline-handle" id="handleEnd" tabindex="0" role="slider" aria-label="Trim end"></div>
+          </div>
+        </div>
+        <div class="transport-row">
+          <button class="btn small" id="previewBtn">\u25b6 Preview selection</button>
+          <div class="selection-readout">Selected length: <span class="n" id="selectedLength">0.0s</span></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Output frame rate</h2>
+        <p class="section-hint">Reducing the frame rate holds each kept frame a little longer instead of speeding the clip up \u2014 the selected length stays the same, it just looks choppier.</p>
+        <div class="fps-chips" id="fpsChips"></div>
+        <div class="fps-custom">
+          <label for="fpsCustomInput">Custom:</label>
+          <input type="number" id="fpsCustomInput" min="1" step="0.1">
+          <span class="section-hint" style="margin:0;">fps</span>
+        </div>
+        <div class="fps-result" id="fpsResult"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Output format</h2>
+        <p class="section-hint">GIFs loop automatically and are easy to drop into chat or a doc, but have no audio and get large fast. Video keeps audio and is more efficient for anything longer than a couple of seconds.</p>
+        <div class="fps-chips" id="formatChips">
+          <button class="fps-chip active" type="button" data-format="webm">Video (.webm)</button>
+          <button class="fps-chip" type="button" data-format="gif">Animated GIF (.gif)</button>
+        </div>
+        <div id="gifOptions" class="hidden">
+          <div class="fps-custom">
+            <label for="gifScale">Size:</label>
+            <select id="gifScale">
+              <option value="1">Original size</option>
+              <option value="0.75">75%</option>
+              <option value="0.5" selected>50%</option>
+              <option value="0.25">25%</option>
+            </select>
+          </div>
+          <div class="fps-result" id="gifEstimate"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="export-row">
+          <button class="btn primary" id="exportClipBtn">Export clip</button>
+          <div class="progress-track" id="progressTrack"><div class="progress-bar" id="progressBar"></div></div>
+        </div>
+        <div class="status" id="clipStatus"></div>
+        <div class="download-card" id="downloadCard">
+          <span>Your clip is ready.</span>
+          <a id="downloadLink" download="clip.webm">Download clip.webm</a>
+        </div>
+        <p class="support-note" id="supportNote">Recording uses your browser's built-in video encoder, so exact quality and format support vary by browser. If export doesn't start, try the latest Chrome or Edge on a desktop computer.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<canvas id="captureCanvas"></canvas>
+
+<script>
+/*!
+ * gif-decoder.js — shared GIF89a/87a decoder (inlined so this file works
+ * standalone with no sibling file required)
+ */
+(function (root, factory) {
+  const mod = factory();
+  if (typeof module === 'object' && module.exports) { module.exports = mod; }
+  else { root.GifDecoder = mod; }
+})(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
+  const DISPOSAL_NONE = 0, DISPOSAL_DO_NOT_DISPOSE = 1, DISPOSAL_RESTORE_BACKGROUND = 2, DISPOSAL_RESTORE_PREVIOUS = 3;
+
+  class ByteReader {
+    constructor(buf) { this.data = buf instanceof Uint8Array ? buf : new Uint8Array(buf); this.pos = 0; }
+    eof() { return this.pos >= this.data.length; }
+    u8() { if (this.pos >= this.data.length) throw new GifParseError('Unexpected end of file'); return this.data[this.pos++]; }
+    u16() { const lo = this.u8(), hi = this.u8(); return lo | (hi << 8); }
+    bytes(n) { if (this.pos + n > this.data.length) throw new GifParseError('Unexpected end of file'); const out = this.data.subarray(this.pos, this.pos + n); this.pos += n; return out; }
+    skip(n) { if (this.pos + n > this.data.length) throw new GifParseError('Unexpected end of file'); this.pos += n; }
+  }
+  class GifParseError extends Error { constructor(msg) { super(msg); this.name = 'GifParseError'; } }
+
+  function readSubBlocks(r) {
+    const chunks = []; let total = 0;
+    for (;;) { const len = r.u8(); if (len === 0) break; const chunk = r.bytes(len); chunks.push(chunk); total += len; }
+    const out = new Uint8Array(total); let off = 0;
+    for (const c of chunks) { out.set(c, off); off += c.length; }
+    return out;
+  }
+
+  function lzwDecode(minCodeSize, data, pixelCount) {
+    const clearCode = 1 << minCodeSize, eoiCode = clearCode + 1;
+    const output = new Uint8Array(pixelCount);
+    let outPos = 0;
+    let dict, codeSize, nextCode;
+    function resetDict() {
+      dict = new Array(4096);
+      for (let i = 0; i < clearCode; i++) dict[i] = [i];
+      dict[clearCode] = null; dict[eoiCode] = null;
+      codeSize = minCodeSize + 1; nextCode = eoiCode + 1;
+    }
+    resetDict();
+    let bitBuffer = 0, bitsInBuffer = 0, bytePos = 0;
+    function readCode() {
+      while (bitsInBuffer < codeSize) {
+        const byte = bytePos < data.length ? data[bytePos] : 0;
+        bytePos++;
+        bitBuffer |= byte << bitsInBuffer;
+        bitsInBuffer += 8;
+      }
+      const code = bitBuffer & ((1 << codeSize) - 1);
+      bitBuffer >>= codeSize; bitsInBuffer -= codeSize;
+      return code;
+    }
+    let prev = null;
+    while (outPos < pixelCount) {
+      if (bytePos > data.length + 4) break;
+      const code = readCode();
+      if (code === clearCode) { resetDict(); prev = null; continue; }
+      if (code === eoiCode) break;
+      let entry;
+      if (dict[code]) entry = dict[code];
+      else if (code === nextCode && prev) entry = prev.concat([prev[0]]);
+      else break;
+      for (let i = 0; i < entry.length && outPos < pixelCount; i++) output[outPos++] = entry[i];
+      if (prev && nextCode < 4096) {
+        dict[nextCode] = prev.concat([entry[0]]);
+        nextCode++;
+        if (nextCode === (1 << codeSize) && codeSize < 12) codeSize++;
+      }
+      prev = entry;
+    }
+    return output;
+  }
+
+  function deinterlace(rows, height) {
+    const out = new Array(height);
+    const passes = [{ start:0, step:8 }, { start:4, step:8 }, { start:2, step:4 }, { start:1, step:2 }];
+    let srcRow = 0;
+    for (const p of passes) for (let y = p.start; y < height; y += p.step) out[y] = rows[srcRow++];
+    return out;
+  }
+
+  function parseGIF(buffer) {
+    const r = new ByteReader(buffer);
+    const sig = String.fromCharCode(r.u8(), r.u8(), r.u8());
+    const ver = String.fromCharCode(r.u8(), r.u8(), r.u8());
+    if (sig !== 'GIF' || (ver !== '87a' && ver !== '89a')) throw new GifParseError('Not a GIF file (bad signature)');
+    const width = r.u16(), height = r.u16();
+    const packed = r.u8();
+    const gctFlag = (packed & 0x80) !== 0, gctSize = 2 << (packed & 0x07);
+    r.u8(); r.u8();
+    let globalColorTable = null;
+    if (gctFlag) globalColorTable = readColorTable(r, gctSize);
+    const frames = [];
+    let loopCount = 0, hasLoopExt = false;
+    let pendingDelay = 100, pendingDisposal = DISPOSAL_NONE, pendingTransparentIndex = -1, pendingHasTransparency = false;
+    for (;;) {
+      if (r.eof()) break;
+      const blockType = r.u8();
+      if (blockType === 0x3b) break;
+      if (blockType === 0x21) {
+        const label = r.u8();
+        if (label === 0xf9) {
+          const blockSize = r.u8();
+          const gcePacked = r.u8();
+          pendingDisposal = (gcePacked >> 2) & 0x07;
+          pendingHasTransparency = (gcePacked & 0x01) !== 0;
+          const delayCs = r.u16();
+          pendingTransparentIndex = r.u8();
+          if (!pendingHasTransparency) pendingTransparentIndex = -1;
+          pendingDelay = delayCs <= 1 ? 100 : delayCs * 10;
+          if (blockSize > 4) r.skip(blockSize - 4);
+          const terminator = r.u8();
+          if (terminator !== 0) throw new GifParseError('Malformed graphic control extension');
+        } else if (label === 0xff) {
+          const blockSize = r.u8();
+          const appId = r.bytes(blockSize);
+          const isNetscape = appId.length >= 11 && String.fromCharCode.apply(null, appId.subarray(0,11)) === 'NETSCAPE2.0';
+          const sub = readSubBlocks(r);
+          if (isNetscape && sub.length >= 3 && sub[0] === 1) { loopCount = sub[1] | (sub[2] << 8); hasLoopExt = true; }
+        } else { readSubBlocks(r); }
+        continue;
+      }
+      if (blockType === 0x2c) {
+        const left = r.u16(), top = r.u16(), imgWidth = r.u16(), imgHeight = r.u16();
+        const imgPacked = r.u8();
+        const lctFlag = (imgPacked & 0x80) !== 0, interlaced = (imgPacked & 0x40) !== 0, lctSize = 2 << (imgPacked & 0x07);
+        let colorTable = globalColorTable;
+        if (lctFlag) colorTable = readColorTable(r, lctSize);
+        if (!colorTable) throw new GifParseError('Frame has no color table (local or global)');
+        const minCodeSize = r.u8();
+        const imgData = readSubBlocks(r);
+        const indices = lzwDecode(minCodeSize, imgData, imgWidth * imgHeight);
+        let rows = [];
+        for (let y = 0; y < imgHeight; y++) rows.push(indices.subarray(y*imgWidth, (y+1)*imgWidth));
+        if (interlaced) rows = deinterlace(rows, imgHeight);
+        const rgba = new Uint8ClampedArray(imgWidth * imgHeight * 4);
+        for (let y = 0; y < imgHeight; y++) {
+          const row = rows[y];
+          for (let x = 0; x < imgWidth; x++) {
+            const idx = row[x], o = (y*imgWidth+x)*4;
+            if (idx === pendingTransparentIndex) { rgba[o]=0; rgba[o+1]=0; rgba[o+2]=0; rgba[o+3]=0; }
+            else { const c = idx*3; rgba[o]=colorTable[c]; rgba[o+1]=colorTable[c+1]; rgba[o+2]=colorTable[c+2]; rgba[o+3]=255; }
+          }
+        }
+        frames.push({ delay: pendingDelay, disposal: pendingDisposal, patch: { x:left, y:top, width:imgWidth, height:imgHeight, rgba } });
+        pendingDelay = 100; pendingDisposal = DISPOSAL_NONE; pendingTransparentIndex = -1; pendingHasTransparency = false;
+        continue;
+      }
+      throw new GifParseError('Unknown block type 0x' + blockType.toString(16));
+    }
+    compositeFrames(frames, width, height);
+    return { width, height, loopCount: hasLoopExt ? loopCount : 0, frames };
+  }
+
+  function readColorTable(r, size) { const table = new Uint8Array(size*3); for (let i=0;i<size*3;i++) table[i]=r.u8(); return table; }
+
+  function compositeFrames(frames, width, height) {
+    let canvas = new Uint8ClampedArray(width*height*4);
+    let savedForRestore = null, pendingDisposal = null, pendingRect = null;
+    for (const frame of frames) {
+      if (pendingDisposal === DISPOSAL_RESTORE_BACKGROUND && pendingRect) clearRect(canvas, width, pendingRect);
+      else if (pendingDisposal === DISPOSAL_RESTORE_PREVIOUS && savedForRestore) canvas.set(savedForRestore);
+      if (frame.disposal === DISPOSAL_RESTORE_PREVIOUS) savedForRestore = canvas.slice();
+      drawPatch(canvas, width, frame.patch);
+      frame.composited = canvas.slice();
+      pendingDisposal = frame.disposal;
+      pendingRect = frame.patch;
+    }
+  }
+  function drawPatch(canvas, canvasWidth, patch) {
+    for (let y=0;y<patch.height;y++) {
+      const destRow = patch.y+y;
+      for (let x=0;x<patch.width;x++) {
+        const destCol = patch.x+x, srcO = (y*patch.width+x)*4;
+        if (patch.rgba[srcO+3] === 0) continue;
+        const destO = (destRow*canvasWidth+destCol)*4;
+        canvas[destO]=patch.rgba[srcO]; canvas[destO+1]=patch.rgba[srcO+1]; canvas[destO+2]=patch.rgba[srcO+2]; canvas[destO+3]=255;
+      }
+    }
+  }
+  function clearRect(canvas, canvasWidth, rect) {
+    for (let y=0;y<rect.height;y++) { const row=rect.y+y, start=(row*canvasWidth+rect.x)*4; canvas.fill(0, start, start+rect.width*4); }
+  }
+
+  return { parseGIF, lzwDecode, GifParseError };
+});
+</script>
+
+<script>
+(function(){
+  "use strict";
+
+  const el = {};
+  ["dropzone","fileInput","filename","workArea","videoPreviewPanel","video",
+   "metaRes","metaDuration","metaFpsRow","metaFps",
+   "modeGrabBtn","modeClipBtn","clipUnavailableNote",
+   "grabPanel","scrub","jumpTime","readout","grabStatus","grabResultPanel","previewCanvas","downloadPngBtn","copyPngBtn",
+   "clipModeSection","timelineTrack","timelineFill","timelinePlayhead","handleStart","handleEnd",
+   "labelStart","labelEnd","selectedLength","previewBtn",
+   "fpsChips","fpsCustomInput","fpsResult","formatChips","gifOptions","gifScale","gifEstimate","supportNote",
+   "exportClipBtn","progressTrack","progressBar","clipStatus","downloadCard","downloadLink","captureCanvas"
+  ].forEach(id => { el[id] = document.getElementById(id); });
+  const ctx = el.previewCanvas.getContext("2d");
+  const cctx = el.captureCanvas.getContext("2d");
+
+  if (!el.video.captureStream && el.video.mozCaptureStream) el.video.captureStream = el.video.mozCaptureStream.bind(el.video);
+
+  function fmt(t){ if(!isFinite(t)||t<0) t=0; const m=Math.floor(t/60), s=t-m*60; return m+":"+s.toFixed(1).padStart(4,"0"); }
+  function clamp(v,lo,hi){ return Math.min(hi, Math.max(lo, v)); }
+
+  /* =========================================================
+     STATE
+  ========================================================= */
+  let currentKind = null;       // 'video' | 'gif'
+  let mode = "grab";            // 'grab' | 'clip'
+  let objectUrl = null;
+
+  // gif state
+  let gifData = null;           // { width, height, frames: [{cumMs, imageData}] }
+
+  // video state
+  let duration = 0, trimStart = 0, trimEnd = 0, sourceFps = 30, targetFps = 30;
+  let outputFormat = "webm";
+  let dragging = null;
+  let isPreviewing = false, previewRafId = null, exportRafId = null;
+  let gifWorkerScriptPromise = null;
+  let rafPending = false, pendingScrubTime = 0;
+  let videoSeekBusy = false, videoSeekQueued = null;
+
+  const MIN_GAP = 0.15;
+  const GIF_WORKER_URL = "https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js";
+
+  function setGrabStatus(msg, isError){ el.grabStatus.textContent = msg||""; el.grabStatus.className = "status"+(isError?" error":""); }
+  function setClipStatus(msg, isError){ el.clipStatus.textContent = msg||""; el.clipStatus.className = "status"+(isError?" error":""); }
+
+  /* =========================================================
+     FILE LOADING
+  ========================================================= */
+  el.dropzone.addEventListener("click", () => el.fileInput.click());
+  el.dropzone.addEventListener("keydown", e => { if(e.key==="Enter"||e.key===" ") el.fileInput.click(); });
+  el.dropzone.addEventListener("dragover", e => { e.preventDefault(); el.dropzone.classList.add("dragover"); });
+  el.dropzone.addEventListener("dragleave", () => el.dropzone.classList.remove("dragover"));
+  el.dropzone.addEventListener("drop", e => {
+    e.preventDefault(); el.dropzone.classList.remove("dragover");
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if(f) handleFile(f);
+  });
+  el.fileInput.addEventListener("change", () => { if(el.fileInput.files[0]) handleFile(el.fileInput.files[0]); });
+
+  async function handleFile(file){
+    el.filename.textContent = file.name;
+    el.workArea.classList.remove("hidden");
+    el.grabResultPanel.style.display = "none";
+    el.downloadCard.classList.remove("visible");
+    el.scrub.disabled = true; el.jumpTime.disabled = true;
+    setGrabStatus(""); setClipStatus("");
+    gifData = null;
+
+    const isGif = file.type === "image/gif" || /\.gif$/i.test(file.name);
+
+    if(isGif){
+      currentKind = "gif";
+      el.videoPreviewPanel.style.display = "none";
+      el.metaFpsRow.style.display = "none";
+      setModeAvailability(false);
+      setGrabStatus("Reading GIF\u2026");
+      try{
+        const buf = await file.arrayBuffer();
+        const parsed = GifDecoder.parseGIF(buf);
+        let cum = 0;
+        const frames = parsed.frames.map(f => {
+          cum += f.delay;
+          return { cumMs: cum, imageData: new ImageData(f.composited, parsed.width, parsed.height) };
+        });
+        gifData = { width: parsed.width, height: parsed.height, frames };
+        el.metaRes.textContent = parsed.width+"\u00d7"+parsed.height;
+        el.metaDuration.textContent = (cum/1000).toFixed(1)+"s ("+frames.length+" frames)";
+        setupScrub(cum/1000);
+        setGrabStatus("GIF loaded \u2014 "+frames.length+" frames, ~"+(cum/1000).toFixed(1)+"s total.");
+        renderGrabAtTime(Math.min(5, cum/1000));
+      } catch(err){
+        console.error(err);
+        setGrabStatus("Could not parse this GIF: "+err.message, true);
+      }
+    } else if(file.type.startsWith("video/")){
+      currentKind = "video";
+      el.videoPreviewPanel.style.display = "block";
+      el.metaFpsRow.style.display = "inline";
+      setModeAvailability(true);
+      if(objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = URL.createObjectURL(file);
+      el.video.src = objectUrl;
+      el.video.muted = true;
+      setGrabStatus("Reading video\u2026");
+      el.video.onloadedmetadata = () => {
+        duration = el.video.duration;
+        trimStart = 0; trimEnd = duration;
+        el.captureCanvas.width = el.video.videoWidth;
+        el.captureCanvas.height = el.video.videoHeight;
+        el.metaRes.textContent = el.video.videoWidth+"\u00d7"+el.video.videoHeight;
+        el.metaDuration.textContent = fmt(duration)+" min:sec";
+        el.metaFps.textContent = "detecting\u2026";
+        setupScrub(duration);
+        updateTimelineUI();
+        detectFps();
+        setGrabStatus("Video loaded \u2014 duration "+duration.toFixed(1)+"s.");
+        renderGrabAtTime(Math.min(5, duration));
+      };
+      el.video.onerror = () => setGrabStatus("Could not read this video file.", true);
+    } else {
+      setGrabStatus("Please choose a video file or a GIF.", true);
+    }
+  }
+
+  function setModeAvailability(videoAvailable){
+    el.modeClipBtn.disabled = !videoAvailable;
+    el.clipUnavailableNote.classList.toggle("hidden", videoAvailable);
+    if(!videoAvailable && mode==="clip") setMode("grab");
+  }
+
+  /* =========================================================
+     MODE SWITCH
+  ========================================================= */
+  function setMode(next){
+    mode = next;
+    el.modeGrabBtn.classList.toggle("active", mode==="grab");
+    el.modeClipBtn.classList.toggle("active", mode==="clip");
+    el.grabPanel.style.display = mode==="grab" ? "block" : "none";
+    el.grabResultPanel.style.display = (mode==="grab" && el.previewCanvas.width>0) ? "block" : "none";
+    el.clipModeSection.classList.toggle("hidden", mode!=="clip");
+    if(mode==="clip" && isPreviewing) stopPreview();
+  }
+  el.modeGrabBtn.addEventListener("click", () => setMode("grab"));
+  el.modeClipBtn.addEventListener("click", () => { if(!el.modeClipBtn.disabled) setMode("clip"); });
+
+  /* =========================================================
+     GRAB-A-FRAME MODE (video + gif)
+  ========================================================= */
+  function setupScrub(maxSeconds){
+    el.scrub.min = 0; el.scrub.max = maxSeconds.toFixed(2); el.scrub.step = 0.05;
+    el.scrub.disabled = false; el.jumpTime.disabled = false; el.jumpTime.max = maxSeconds.toFixed(2);
+  }
+
+  function renderGrabAtTime(t){
+    t = Math.max(0, t);
+    el.scrub.value = t;
+    el.jumpTime.value = Math.round(t*10)/10;
+    el.readout.textContent = t.toFixed(1)+"s";
+    if(currentKind==="video") drawVideoFrame(t);
+    else if(currentKind==="gif") drawGifFrame(t);
+  }
+
+  function queueGrabRender(t){
+    pendingScrubTime = t;
+    if(rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => { rafPending = false; renderGrabAtTime(pendingScrubTime); });
+  }
+  el.scrub.addEventListener("input", () => queueGrabRender(parseFloat(el.scrub.value)));
+  el.jumpTime.addEventListener("change", () => renderGrabAtTime(parseFloat(el.jumpTime.value)||0));
+
+  function drawVideoFrame(t){
+    const target = Math.min(t, Math.max(0, duration-0.03));
+    if(videoSeekBusy){ videoSeekQueued = target; return; }
+    videoSeekBusy = true;
+    const onSeeked = () => {
+      el.video.removeEventListener("seeked", onSeeked);
+      el.previewCanvas.width = el.video.videoWidth;
+      el.previewCanvas.height = el.video.videoHeight;
+      ctx.drawImage(el.video, 0, 0);
+      el.grabResultPanel.style.display = mode==="grab" ? "block" : "none";
+      videoSeekBusy = false;
+      if(videoSeekQueued !== null){ const q = videoSeekQueued; videoSeekQueued = null; drawVideoFrame(q); }
+    };
+    el.video.addEventListener("seeked", onSeeked);
+    el.video.currentTime = target;
+  }
+
+  function drawGifFrame(t){
+    if(!gifData) return;
+    const targetMs = t*1000;
+    const frames = gifData.frames;
+    let idx = frames.findIndex(f => f.cumMs >= targetMs);
+    if(idx === -1) idx = frames.length-1;
+    el.previewCanvas.width = gifData.width;
+    el.previewCanvas.height = gifData.height;
+    ctx.putImageData(frames[idx].imageData, 0, 0);
+    el.grabResultPanel.style.display = mode==="grab" ? "block" : "none";
+  }
+
+  el.downloadPngBtn.addEventListener("click", () => {
+    el.previewCanvas.toBlob(blob => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "frame.png";
+      a.click();
+    }, "image/png");
+  });
+  el.copyPngBtn.addEventListener("click", () => {
+    el.previewCanvas.toBlob(async blob => {
+      try{
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        setGrabStatus("Copied to clipboard.");
+      } catch(err){
+        setGrabStatus("Clipboard copy not supported in this browser \u2014 use Download instead.", true);
+      }
+    }, "image/png");
+  });
+
+  /* =========================================================
+     EXPORT-A-CLIP MODE (video only)
+  ========================================================= */
+  function detectFps(){
+    if(!el.video.requestVideoFrameCallback){
+      sourceFps = 30;
+      el.metaFps.textContent = "30 (assumed \u2014 edit below if you know the real value)";
+      buildFpsChips();
+      return;
+    }
+    let count = 0, startMediaTime = null, settled = false;
+    const wasCurrentTime = el.video.currentTime;
+    function settle(fps, label){
+      if(settled) return;
+      settled = true;
+      clearTimeout(giveUpTimer);
+      sourceFps = fps;
+      el.metaFps.textContent = label;
+      if(!el.video.paused) el.video.pause();
+      el.video.currentTime = wasCurrentTime;
+      buildFpsChips();
+    }
+    const giveUpTimer = setTimeout(() => settle(30, "30 (assumed \u2014 auto-detect stalled, edit below if you know the real value)"), 2500);
+    function step(now, metadata){
+      if(settled) return;
+      if(startMediaTime===null) startMediaTime = metadata.mediaTime;
+      count++;
+      const elapsed = metadata.mediaTime - startMediaTime;
+      if(elapsed < 0.9 && !el.video.paused) el.video.requestVideoFrameCallback(step);
+      else{
+        const estimate = elapsed>0 ? count/elapsed : 30;
+        let fps = Math.round(estimate*100)/100;
+        if(fps<1 || fps>240 || !isFinite(fps)) fps = 30;
+        settle(fps, fps+" fps (estimated)");
+      }
+    }
+    el.video.play().then(() => { if(!settled) el.video.requestVideoFrameCallback(step); })
+      .catch(() => settle(30, "30 (assumed \u2014 auto-detect failed, edit below if you know the real value)"));
+  }
+
+  function updateTimelineUI(){
+    const startPct = duration ? (trimStart/duration)*100 : 0;
+    const endPct = duration ? (trimEnd/duration)*100 : 100;
+    el.handleStart.style.left = startPct+"%";
+    el.handleEnd.style.left = endPct+"%";
+    el.timelineFill.style.left = startPct+"%";
+    el.timelineFill.style.width = (endPct-startPct)+"%";
+    el.labelStart.textContent = fmt(trimStart);
+    el.labelEnd.textContent = fmt(trimEnd);
+    el.selectedLength.textContent = (trimEnd-trimStart).toFixed(1)+"s";
+    updateFpsResult();
+  }
+
+  function beginDrag(which, e){ dragging = which; if(isPreviewing) stopPreview(); e.preventDefault(); }
+  el.handleStart.addEventListener("pointerdown", e => beginDrag("start", e));
+  el.handleEnd.addEventListener("pointerdown", e => beginDrag("end", e));
+  window.addEventListener("pointermove", e => {
+    if(!dragging || !duration) return;
+    const rect = el.timelineTrack.getBoundingClientRect();
+    const x = clamp(e.clientX-rect.left, 0, rect.width);
+    const t = (x/rect.width)*duration;
+    if(dragging==="start"){ trimStart = clamp(t, 0, trimEnd-MIN_GAP); el.video.currentTime = trimStart; }
+    else{ trimEnd = clamp(t, trimStart+MIN_GAP, duration); el.video.currentTime = trimEnd; }
+    updateTimelineUI();
+  });
+  window.addEventListener("pointerup", () => { dragging = null; });
+  el.timelineTrack.addEventListener("click", e => {
+    if(dragging || !duration) return;
+    const rect = el.timelineTrack.getBoundingClientRect();
+    const x = clamp(e.clientX-rect.left, 0, rect.width);
+    el.video.currentTime = clamp((x/rect.width)*duration, trimStart, trimEnd);
+  });
+  el.video.addEventListener("timeupdate", () => {
+    if(!duration) return;
+    el.timelinePlayhead.style.left = ((el.video.currentTime/duration)*100)+"%";
+  });
+
+  el.previewBtn.addEventListener("click", () => { if(isPreviewing) stopPreview(); else startPreview(); });
+  function startPreview(){
+    el.video.muted = false; el.video.currentTime = trimStart; el.video.play();
+    isPreviewing = true; el.previewBtn.textContent = "\u23f8 Stop preview";
+    watchPreview();
+  }
+  function watchPreview(){
+    if(!isPreviewing) return;
+    if(el.video.currentTime >= trimEnd || el.video.ended){ stopPreview(); return; }
+    previewRafId = requestAnimationFrame(watchPreview);
+  }
+  function stopPreview(){
+    isPreviewing = false; el.previewBtn.textContent = "\u25b6 Preview selection";
+    el.video.pause();
+    if(previewRafId) cancelAnimationFrame(previewRafId);
+  }
+
+  function buildFpsChips(){
+    const divisors = [1,2,3,4];
+    el.fpsChips.innerHTML = "";
+    divisors.forEach(d => {
+      const chip = document.createElement("button");
+      chip.className = "fps-chip"; chip.type = "button";
+      const val = Math.round((sourceFps/d)*100)/100;
+      chip.textContent = d===1 ? ("Full \u00b7 "+val+" fps") : ("1/"+d+" \u00b7 "+val+" fps");
+      chip.dataset.value = val;
+      chip.addEventListener("click", () => setTargetFps(val, chip));
+      el.fpsChips.appendChild(chip);
+    });
+    el.fpsCustomInput.max = Math.max(sourceFps, 1);
+    setTargetFps(sourceFps, el.fpsChips.firstChild);
+  }
+  function setTargetFps(val, chipEl){
+    targetFps = clamp(val, 1, Math.max(sourceFps, val));
+    el.fpsCustomInput.value = targetFps;
+    Array.from(el.fpsChips.children).forEach(c => c.classList.remove("active"));
+    if(chipEl) chipEl.classList.add("active");
+    updateFpsResult();
+  }
+  el.fpsCustomInput.addEventListener("input", () => {
+    const v = parseFloat(el.fpsCustomInput.value);
+    if(!isFinite(v) || v<=0) return;
+    targetFps = v;
+    Array.from(el.fpsChips.children).forEach(c => c.classList.toggle("active", Math.abs(parseFloat(c.dataset.value)-v)<0.01));
+    updateFpsResult();
+  });
+  function updateFpsResult(){
+    if(!duration){ el.fpsResult.textContent=""; el.gifEstimate.textContent=""; return; }
+    const len = trimEnd-trimStart;
+    const framesKept = Math.max(1, Math.round(len*targetFps));
+    const dropping = targetFps < sourceFps-0.01;
+    el.fpsResult.textContent = dropping
+      ? ("Output holds ~"+framesKept+" unique frames over "+len.toFixed(1)+"s \u2014 same length, fewer frames.")
+      : "Full source frame rate \u2014 trim only, no frames dropped.";
+    updateGifEstimate(framesKept);
+  }
+  function updateGifEstimate(framesKept){
+    if(!duration){ el.gifEstimate.textContent=""; return; }
+    const scale = parseFloat(el.gifScale.value)||1;
+    const w = Math.max(1, Math.round(el.video.videoWidth*scale));
+    const h = Math.max(1, Math.round(el.video.videoHeight*scale));
+    let text = "~"+framesKept+" frames at "+w+"\u00d7"+h+".";
+    if(framesKept>250) text += " That many frames may take a while and make a large file \u2014 a lower fps or smaller size will help.";
+    el.gifEstimate.textContent = text;
+  }
+  el.gifScale.addEventListener("change", () => updateGifEstimate(Math.max(1, Math.round((trimEnd-trimStart)*targetFps))));
+
+  Array.from(el.formatChips.children).forEach(chip => {
+    chip.addEventListener("click", () => {
+      outputFormat = chip.dataset.format;
+      Array.from(el.formatChips.children).forEach(c => c.classList.remove("active"));
+      chip.classList.add("active");
+      const isGif = outputFormat === "gif";
+      el.gifOptions.classList.toggle("hidden", !isGif);
+      el.exportClipBtn.textContent = isGif ? "Export GIF" : "Export clip";
+      el.supportNote.textContent = isGif
+        ? "GIF export happens entirely in your browser too, using a small GIF-encoding library loaded from cdnjs \u2014 it needs an internet connection the first time you export one."
+        : "Recording uses your browser's built-in video encoder, so exact quality and format support vary by browser. If export doesn't start, try the latest Chrome or Edge on a desktop computer.";
+      updateFpsResult();
+    });
+  });
+
+  function pickMimeType(){
+    const candidates = ["video/webm;codecs=vp9,opus","video/webm;codecs=vp8,opus","video/webm"];
+    for(const c of candidates) if(window.MediaRecorder && MediaRecorder.isTypeSupported(c)) return c;
+    return "";
+  }
+
+  el.exportClipBtn.addEventListener("click", () => {
+    if(isPreviewing) stopPreview();
+    if(outputFormat === "gif"){ exportGif(); return; }
+    if(!window.MediaRecorder || !el.video.captureStream){
+      setClipStatus("This browser does not support in-browser video export. Try Chrome or Edge on desktop.", true);
+      return;
+    }
+    exportClip();
+  });
+
+  function getGifWorkerScript(){
+    if(!gifWorkerScriptPromise){
+      gifWorkerScriptPromise = fetch(GIF_WORKER_URL)
+        .then(r => { if(!r.ok) throw new Error("could not load GIF worker script"); return r.blob(); })
+        .then(blob => URL.createObjectURL(blob));
+    }
+    return gifWorkerScriptPromise;
+  }
+
+  function seekTo(t){
+    return new Promise(resolve => {
+      if(Math.abs(el.video.currentTime-t) < 0.008){ resolve(); return; }
+      let done = false;
+      const timer = setTimeout(() => { if(done) return; done=true; el.video.removeEventListener("seeked", onSeek); resolve(); }, 700);
+      function onSeek(){ if(done) return; done=true; clearTimeout(timer); el.video.removeEventListener("seeked", onSeek); resolve(); }
+      el.video.addEventListener("seeked", onSeek);
+      el.video.currentTime = t;
+    });
+  }
+
+  function exportGif(){
+    if(typeof GIF === "undefined"){
+      setClipStatus("The GIF encoder failed to load \u2014 check your internet connection and try again.", true);
+      return;
+    }
+    el.exportClipBtn.disabled = true;
+    el.downloadCard.classList.remove("visible");
+    el.progressTrack.classList.add("active");
+    el.progressBar.style.width = "0%";
+    setClipStatus("Preparing GIF\u2026");
+
+    if(isPreviewing) stopPreview();
+    el.video.pause();
+    el.video.muted = true;
+
+    const scale = parseFloat(el.gifScale.value)||1;
+    const outW = Math.max(1, Math.round(el.video.videoWidth*scale));
+    const outH = Math.max(1, Math.round(el.video.videoHeight*scale));
+    el.captureCanvas.width = outW; el.captureCanvas.height = outH;
+
+    const period = 1/targetFps;
+    const frameTimes = [];
+    for(let t=trimStart; t<trimEnd-0.0005; t+=period) frameTimes.push(t);
+    if(!frameTimes.length) frameTimes.push(trimStart);
+    const delayMs = Math.max(20, Math.round(period*1000));
+
+    function fail(message){
+      setClipStatus(message, true);
+      el.progressTrack.classList.remove("active");
+      el.exportClipBtn.disabled = false;
+      el.video.muted = true;
+    }
+
+    getGifWorkerScript().then(workerScript => {
+      let gif;
+      try{ gif = new GIF({ workers:2, quality:10, width:outW, height:outH, workerScript }); }
+      catch(err){ fail("Could not start the GIF encoder: "+err.message); return; }
+
+      gif.on("progress", p => { el.progressBar.style.width = (70+p*30)+"%"; });
+      gif.on("finished", blob => {
+        const url = URL.createObjectURL(blob);
+        el.downloadLink.href = url; el.downloadLink.download = "clip.gif";
+        const sizeMb = (blob.size/(1024*1024)).toFixed(1);
+        el.downloadLink.textContent = "Download clip.gif ("+sizeMb+" MB)";
+        el.downloadCard.classList.add("visible");
+        setClipStatus("Done.");
+        el.progressTrack.classList.remove("active");
+        el.exportClipBtn.disabled = false;
+      });
+
+      setClipStatus("Capturing frames\u2026");
+      let idx = 0;
+      function nextFrame(){
+        if(idx >= frameTimes.length){
+          setClipStatus("Rendering GIF\u2026");
+          try{ gif.render(); } catch(err){ fail("Could not render the GIF: "+err.message); }
+          return;
+        }
+        seekTo(frameTimes[idx]).then(() => {
+          cctx.drawImage(el.video, 0, 0, outW, outH);
+          gif.addFrame(cctx, { copy:true, delay:delayMs });
+          idx++;
+          el.progressBar.style.width = (Math.round((idx/frameTimes.length)*70))+"%";
+          nextFrame();
+        });
+      }
+      nextFrame();
+    }).catch(err => fail("Could not load the GIF encoder: "+err.message));
+  }
+
+  function exportClip(){
+    el.exportClipBtn.disabled = true;
+    el.downloadCard.classList.remove("visible");
+    el.progressTrack.classList.add("active");
+    el.progressBar.style.width = "0%";
+    setClipStatus("Preparing export\u2026");
+
+    const mimeType = pickMimeType();
+    const useCanvas = targetFps < sourceFps-0.01;
+    let combinedStream, canvasVideoTrack = null;
+
+    try{
+      if(useCanvas){
+        const canvasStream = el.captureCanvas.captureStream(targetFps);
+        canvasVideoTrack = canvasStream.getVideoTracks()[0];
+        const sourceStream = el.video.captureStream();
+        const audioTracks = sourceStream.getAudioTracks();
+        combinedStream = new MediaStream([canvasVideoTrack, ...audioTracks]);
+      } else {
+        combinedStream = el.video.captureStream();
+      }
+    } catch(err){
+      setClipStatus("Could not start capture in this browser: "+err.message, true);
+      el.exportClipBtn.disabled = false;
+      el.progressTrack.classList.remove("active");
+      return;
+    }
+
+    let recorder;
+    try{ recorder = mimeType ? new MediaRecorder(combinedStream, { mimeType }) : new MediaRecorder(combinedStream); }
+    catch(err){ failExport("Could not create a recorder in this browser: "+err.message); return; }
+
+    const chunks = [];
+    let watchdogTimer = null, stallTimer = null, finished = false;
+    function cleanupTimers(){ if(watchdogTimer) clearTimeout(watchdogTimer); if(stallTimer) clearInterval(stallTimer); if(exportRafId) cancelAnimationFrame(exportRafId); }
+    function failExport(message){
+      if(finished) return; finished = true; cleanupTimers();
+      try{ if(recorder && recorder.state!=="inactive") recorder.stop(); }catch(e){}
+      el.video.pause(); el.video.muted = true;
+      setClipStatus(message, true);
+      el.progressTrack.classList.remove("active");
+      el.exportClipBtn.disabled = false;
+    }
+
+    recorder.ondataavailable = e => { if(e.data && e.data.size) chunks.push(e.data); };
+    recorder.onerror = e => failExport("Recording error: "+((e.error && e.error.message)||"unknown error"));
+    recorder.onstop = () => {
+      if(finished) return; finished = true; cleanupTimers();
+      el.video.muted = true;
+      if(!chunks.length){
+        setClipStatus("Export produced no data \u2014 try a shorter clip or a different browser.", true);
+        el.progressTrack.classList.remove("active");
+        el.exportClipBtn.disabled = false;
+        return;
+      }
+      const blob = new Blob(chunks, { type: (mimeType||"video/webm").split(";")[0] });
+      const url = URL.createObjectURL(blob);
+      el.downloadLink.href = url; el.downloadLink.download = "clip.webm";
+      const sizeMb = (blob.size/(1024*1024)).toFixed(1);
+      el.downloadLink.textContent = "Download clip.webm ("+sizeMb+" MB)";
+      el.downloadCard.classList.add("visible");
+      setClipStatus("Done.");
+      el.progressTrack.classList.remove("active");
+      el.exportClipBtn.disabled = false;
+    };
+
+    el.video.muted = false;
+    el.video.pause();
+
+    function beginRecording(){
+      try{
+        if(useCanvas) cctx.drawImage(el.video, 0, 0, el.captureCanvas.width, el.captureCanvas.height);
+        recorder.start();
+      } catch(err){ failExport("Could not start recording: "+err.message); return; }
+
+      const playResult = el.video.play();
+      if(playResult && playResult.catch) playResult.catch(err => failExport("Playback was blocked by the browser: "+err.message));
+      setClipStatus("Recording\u2026");
+      let lastCapture = trimStart;
+      const period = 1/targetFps;
+
+      const expectedMs = (trimEnd-trimStart)*1000;
+      watchdogTimer = setTimeout(() => failExport("Export timed out \u2014 playback did not finish in this browser. Try a shorter clip or a different browser."), expectedMs+8000);
+
+      let lastSeenTime = el.video.currentTime, lastAdvanceAt = Date.now();
+      stallTimer = setInterval(() => {
+        if(el.video.currentTime > lastSeenTime+0.01){ lastSeenTime = el.video.currentTime; lastAdvanceAt = Date.now(); }
+        else if(Date.now()-lastAdvanceAt > 3000) failExport("Playback stalled during export \u2014 try again or use a different browser.");
+      }, 500);
+
+      function tick(){
+        if(finished) return;
+        const t = el.video.currentTime;
+        if(t >= trimEnd-0.005 || el.video.ended){ finish(); return; }
+        if(useCanvas && (t-lastCapture) >= period-0.0008){
+          cctx.drawImage(el.video, 0, 0, el.captureCanvas.width, el.captureCanvas.height);
+          lastCapture = t;
+        }
+        el.progressBar.style.width = clamp(((t-trimStart)/(trimEnd-trimStart))*100, 0, 100)+"%";
+        exportRafId = requestAnimationFrame(tick);
+      }
+      exportRafId = requestAnimationFrame(tick);
+
+      function finish(){
+        if(finished) return;
+        cleanupTimers();
+        el.video.pause();
+        el.progressBar.style.width = "100%";
+        setClipStatus("Finalizing\u2026");
+        setTimeout(() => { try{ if(recorder.state!=="inactive") recorder.stop(); } catch(err){ failExport("Could not finalize recording: "+err.message); } }, 60);
+      }
+    }
+
+    if(Math.abs(el.video.currentTime-trimStart) < 0.03){
+      beginRecording();
+    } else {
+      let started = false;
+      const seekTimeout = setTimeout(() => { if(started) return; started=true; el.video.removeEventListener("seeked", onSeeked); beginRecording(); }, 800);
+      function onSeeked(){ if(started) return; started=true; clearTimeout(seekTimeout); el.video.removeEventListener("seeked", onSeeked); beginRecording(); }
+      el.video.addEventListener("seeked", onSeeked);
+      el.video.currentTime = trimStart;
+    }
+  }
+
+})();
+</script>
+</body>
+</html>

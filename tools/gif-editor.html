@@ -1,0 +1,1883 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>GIF Editor</title>
+<script>
+/*!
+ * gif-decoder.js — shared GIF89a/87a decoder
+ *
+ * Replaces the hand-rolled parseGIF/lzwDecode pairs duplicated across
+ * frame-grabber, gif-compressor, gif-editor, gif-shape-cutter, and
+ * gif-splicer, plus the two third-party libs (omggif, gifuct-js) used
+ * by gifsmith and gif-grid-studio. One decoder, one set of bugs to fix.
+ *
+ * Usage:
+ *   const gif = GifDecoder.parseGIF(arrayBuffer);
+ *   // gif.width, gif.height, gif.loopCount
+ *   // gif.frames[i].delay        -> ms
+ *   // gif.frames[i].disposal     -> 0..3 (raw GIF disposal method)
+ *   // gif.frames[i].patch        -> {x,y,width,height,rgba:Uint8ClampedArray} (this frame's own pixels only)
+ *   // gif.frames[i].composited   -> Uint8ClampedArray, full gif.width*gif.height RGBA,
+ *   //                                already composited per the disposal method chain
+ *
+ * If a tool only needs finished frames to draw/re-encode (the common case),
+ * use `composited`. If a tool wants to do its own compositing (e.g. an
+ * editor that needs to know exactly which pixels changed), use `patch`.
+ *
+ * No dependencies. Works as a plain <script> (exposes window.GifDecoder)
+ * or via CommonJS/ESM interop (module.exports).
+ */
+(function (root, factory) {
+  const mod = factory();
+  if (typeof module === 'object' && module.exports) {
+    module.exports = mod;
+  } else {
+    root.GifDecoder = mod;
+  }
+})(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
+
+  // ---- disposal method constants (GIF spec, Graphic Control Extension) ----
+  const DISPOSAL_NONE = 0;        // treat as "do not dispose" (1) if unspecified
+  const DISPOSAL_DO_NOT_DISPOSE = 1;
+  const DISPOSAL_RESTORE_BACKGROUND = 2;
+  const DISPOSAL_RESTORE_PREVIOUS = 3;
+
+  /**
+   * Minimal byte-array reader with bounds checking. Every duplicated
+   * parser in the old tools read past the end of `data` silently on
+   * truncated/corrupt GIFs (returning 0s forever, sometimes looping).
+   * This one throws instead, so a bad file fails loudly rather than
+   * hanging the tab.
+   */
+  class ByteReader {
+    constructor(buf) {
+      this.data = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+      this.pos = 0;
+    }
+    eof() { return this.pos >= this.data.length; }
+    u8() {
+      if (this.pos >= this.data.length) throw new GifParseError('Unexpected end of file');
+      return this.data[this.pos++];
+    }
+    u16() {
+      const lo = this.u8(), hi = this.u8();
+      return lo | (hi << 8);
+    }
+    bytes(n) {
+      if (this.pos + n > this.data.length) throw new GifParseError('Unexpected end of file');
+      const out = this.data.subarray(this.pos, this.pos + n);
+      this.pos += n;
+      return out;
+    }
+    skip(n) {
+      if (this.pos + n > this.data.length) throw new GifParseError('Unexpected end of file');
+      this.pos += n;
+    }
+  }
+
+  class GifParseError extends Error {
+    constructor(msg) { super(msg); this.name = 'GifParseError'; }
+  }
+
+  /** Reads the length-prefixed "data sub-block" chain used for both
+   *  image data and extension blocks, concatenating into one buffer. */
+  function readSubBlocks(r) {
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const len = r.u8();
+      if (len === 0) break;
+      const chunk = r.bytes(len);
+      chunks.push(chunk);
+      total += len;
+    }
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { out.set(c, off); off += c.length; }
+    return out;
+  }
+
+  /**
+   * Variable-width LZW decoder per the GIF spec (based on TIFF LZW with
+   * the GIF-specific early code-size bump). `minCodeSize` comes from the
+   * image data block; `pixelCount` is width*height of the sub-image, used
+   * to pre-size the output and as a stopping condition (some encoders
+   * omit an explicit EOI code).
+   */
+  function lzwDecode(minCodeSize, data, pixelCount) {
+    const clearCode = 1 << minCodeSize;
+    const eoiCode = clearCode + 1;
+    const output = new Uint8Array(pixelCount);
+    let outPos = 0;
+
+    let dict, codeSize, nextCode;
+    function resetDict() {
+      dict = new Array(4096);
+      for (let i = 0; i < clearCode; i++) dict[i] = [i];
+      dict[clearCode] = null;
+      dict[eoiCode] = null;
+      codeSize = minCodeSize + 1;
+      nextCode = eoiCode + 1;
+    }
+    resetDict();
+
+    let bitBuffer = 0, bitsInBuffer = 0, bytePos = 0;
+    function readCode() {
+      while (bitsInBuffer < codeSize) {
+        const byte = bytePos < data.length ? data[bytePos] : 0;
+        bytePos++;
+        bitBuffer |= byte << bitsInBuffer;
+        bitsInBuffer += 8;
+      }
+      const code = bitBuffer & ((1 << codeSize) - 1);
+      bitBuffer >>= codeSize;
+      bitsInBuffer -= codeSize;
+      return code;
+    }
+
+    let prev = null;
+    while (outPos < pixelCount) {
+      if (bytePos > data.length + 4) break; // safety valve on malformed streams
+      const code = readCode();
+      if (code === clearCode) { resetDict(); prev = null; continue; }
+      if (code === eoiCode) break;
+
+      let entry;
+      if (dict[code]) {
+        entry = dict[code];
+      } else if (code === nextCode && prev) {
+        entry = prev.concat([prev[0]]);
+      } else {
+        break; // invalid code — bail rather than corrupt further output
+      }
+
+      for (let i = 0; i < entry.length && outPos < pixelCount; i++) output[outPos++] = entry[i];
+
+      if (prev && nextCode < 4096) {
+        dict[nextCode] = prev.concat([entry[0]]);
+        nextCode++;
+        if (nextCode === (1 << codeSize) && codeSize < 12) codeSize++;
+      }
+      prev = entry;
+    }
+    return output;
+  }
+
+  /** De-interlaces a GIF image (4-pass Adam7-style row order used by GIF,
+   *  not to be confused with PNG's Adam7). `rows` is an array of `width`-
+   *  length rows in the file's storage order; returns rows in display order. */
+  function deinterlace(rows, height) {
+    const out = new Array(height);
+    const passes = [
+      { start: 0, step: 8 },
+      { start: 4, step: 8 },
+      { start: 2, step: 4 },
+      { start: 1, step: 2 },
+    ];
+    let srcRow = 0;
+    for (const p of passes) {
+      for (let y = p.start; y < height; y += p.step) {
+        out[y] = rows[srcRow++];
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Parses a GIF file into logical-screen metadata plus a list of frames.
+   * @param {ArrayBuffer|Uint8Array} buffer
+   * @returns {{width:number, height:number, loopCount:number, frames:Array}}
+   */
+  function parseGIF(buffer) {
+    const r = new ByteReader(buffer);
+
+    const sig = String.fromCharCode(r.u8(), r.u8(), r.u8());
+    const ver = String.fromCharCode(r.u8(), r.u8(), r.u8());
+    if (sig !== 'GIF' || (ver !== '87a' && ver !== '89a')) {
+      throw new GifParseError('Not a GIF file (bad signature)');
+    }
+
+    const width = r.u16();
+    const height = r.u16();
+    const packed = r.u8();
+    const gctFlag = (packed & 0x80) !== 0;
+    const gctSize = 2 << (packed & 0x07);
+    r.u8(); // background color index (unused — we composite against transparent)
+    r.u8(); // pixel aspect ratio (unused)
+
+    let globalColorTable = null;
+    if (gctFlag) globalColorTable = readColorTable(r, gctSize);
+
+    const frames = [];
+    let loopCount = 0; // 0 = infinite (Netscape convention) unless overridden
+    let hasLoopExt = false;
+
+    // Pending graphic control state, applies to the *next* image block.
+    let pendingDelay = 100;      // ms, default matches common browser fallback
+    let pendingDisposal = DISPOSAL_NONE;
+    let pendingTransparentIndex = -1;
+    let pendingHasTransparency = false;
+
+    for (;;) {
+      if (r.eof()) break;
+      const blockType = r.u8();
+
+      if (blockType === 0x3b) break; // trailer
+
+      if (blockType === 0x21) { // extension
+        const label = r.u8();
+        if (label === 0xf9) { // graphic control extension
+          const blockSize = r.u8(); // should be 4
+          const gcePacked = r.u8();
+          pendingDisposal = (gcePacked >> 2) & 0x07;
+          pendingHasTransparency = (gcePacked & 0x01) !== 0;
+          const delayCs = r.u16(); // centiseconds
+          pendingTransparentIndex = r.u8();
+          if (!pendingHasTransparency) pendingTransparentIndex = -1;
+          // Many encoders write 0 or 1 here meaning "as fast as possible";
+          // browsers clamp this to a visible minimum, so we do too.
+          pendingDelay = delayCs <= 1 ? 100 : delayCs * 10;
+          if (blockSize > 4) r.skip(blockSize - 4);
+          const terminator = r.u8();
+          if (terminator !== 0) throw new GifParseError('Malformed graphic control extension');
+        } else if (label === 0xff) { // application extension (e.g. NETSCAPE2.0 loop count)
+          const blockSize = r.u8();
+          const appId = r.bytes(blockSize);
+          const isNetscape = appId.length >= 11 &&
+            String.fromCharCode.apply(null, appId.subarray(0, 11)) === 'NETSCAPE2.0';
+          const sub = readSubBlocks(r);
+          if (isNetscape && sub.length >= 3 && sub[0] === 1) {
+            loopCount = sub[1] | (sub[2] << 8);
+            hasLoopExt = true;
+          }
+        } else {
+          // comment (0xfe), plain text (0x01), or anything unrecognized — skip its body
+          readSubBlocks(r);
+        }
+        continue;
+      }
+
+      if (blockType === 0x2c) { // image descriptor
+        const left = r.u16();
+        const top = r.u16();
+        const imgWidth = r.u16();
+        const imgHeight = r.u16();
+        const imgPacked = r.u8();
+        const lctFlag = (imgPacked & 0x80) !== 0;
+        const interlaced = (imgPacked & 0x40) !== 0;
+        const lctSize = 2 << (imgPacked & 0x07);
+
+        let colorTable = globalColorTable;
+        if (lctFlag) colorTable = readColorTable(r, lctSize);
+        if (!colorTable) throw new GifParseError('Frame has no color table (local or global)');
+
+        const minCodeSize = r.u8();
+        const imgData = readSubBlocks(r);
+        const indices = lzwDecode(minCodeSize, imgData, imgWidth * imgHeight);
+
+        let rows = [];
+        for (let y = 0; y < imgHeight; y++) rows.push(indices.subarray(y * imgWidth, (y + 1) * imgWidth));
+        if (interlaced) rows = deinterlace(rows, imgHeight);
+
+        const rgba = new Uint8ClampedArray(imgWidth * imgHeight * 4);
+        for (let y = 0; y < imgHeight; y++) {
+          const row = rows[y];
+          for (let x = 0; x < imgWidth; x++) {
+            const idx = row[x];
+            const o = (y * imgWidth + x) * 4;
+            if (idx === pendingTransparentIndex) {
+              rgba[o] = 0; rgba[o + 1] = 0; rgba[o + 2] = 0; rgba[o + 3] = 0;
+            } else {
+              const c = idx * 3;
+              rgba[o] = colorTable[c];
+              rgba[o + 1] = colorTable[c + 1];
+              rgba[o + 2] = colorTable[c + 2];
+              rgba[o + 3] = 255;
+            }
+          }
+        }
+
+        frames.push({
+          delay: pendingDelay,
+          disposal: pendingDisposal,
+          patch: { x: left, y: top, width: imgWidth, height: imgHeight, rgba },
+        });
+
+        // Reset per-frame graphic-control state to spec defaults for next iteration.
+        pendingDelay = 100;
+        pendingDisposal = DISPOSAL_NONE;
+        pendingTransparentIndex = -1;
+        pendingHasTransparency = false;
+        continue;
+      }
+
+      throw new GifParseError('Unknown block type 0x' + blockType.toString(16));
+    }
+
+    compositeFrames(frames, width, height);
+
+    return {
+      width,
+      height,
+      loopCount: hasLoopExt ? loopCount : 0,
+      frames,
+    };
+  }
+
+  function readColorTable(r, size) {
+    const table = new Uint8Array(size * 3);
+    for (let i = 0; i < size * 3; i++) table[i] = r.u8();
+    return table;
+  }
+
+  /**
+   * Fills in `frame.composited` for every frame — a full-canvas RGBA
+   * buffer, honoring each frame's disposal method against the ones
+   * before it. This is the part every one of the old tools either
+   * skipped (frame-grabber only drew the raw patch) or half-implemented
+   * inline, which is why several of them showed ghosting/tearing on
+   * GIFs that relied on "restore to background" or "restore to previous".
+   */
+  function compositeFrames(frames, width, height) {
+    let canvas = new Uint8ClampedArray(width * height * 4); // starts transparent
+    let savedForRestore = null; // snapshot for DISPOSAL_RESTORE_PREVIOUS
+    let pendingDisposal = null; // disposal method of the *previous* frame
+    let pendingRect = null;     // that frame's patch rect
+
+    for (const frame of frames) {
+      // Disposal from the *previous* frame is applied before drawing this one.
+      if (pendingDisposal === DISPOSAL_RESTORE_BACKGROUND && pendingRect) {
+        clearRect(canvas, width, pendingRect);
+      } else if (pendingDisposal === DISPOSAL_RESTORE_PREVIOUS && savedForRestore) {
+        canvas.set(savedForRestore);
+      }
+
+      // If this frame needs "restore to previous" after itself, snapshot now,
+      // before drawing it, so the snapshot reflects the state beneath it.
+      if (frame.disposal === DISPOSAL_RESTORE_PREVIOUS) {
+        savedForRestore = canvas.slice();
+      }
+
+      drawPatch(canvas, width, frame.patch);
+      frame.composited = canvas.slice();
+
+      pendingDisposal = frame.disposal;
+      pendingRect = frame.patch;
+    }
+  }
+
+  function drawPatch(canvas, canvasWidth, patch) {
+    for (let y = 0; y < patch.height; y++) {
+      const destRow = patch.y + y;
+      for (let x = 0; x < patch.width; x++) {
+        const destCol = patch.x + x;
+        const srcO = (y * patch.width + x) * 4;
+        if (patch.rgba[srcO + 3] === 0) continue; // transparent pixel — leave canvas as-is
+        const destO = (destRow * canvasWidth + destCol) * 4;
+        canvas[destO] = patch.rgba[srcO];
+        canvas[destO + 1] = patch.rgba[srcO + 1];
+        canvas[destO + 2] = patch.rgba[srcO + 2];
+        canvas[destO + 3] = 255;
+      }
+    }
+  }
+
+  function clearRect(canvas, canvasWidth, rect) {
+    for (let y = 0; y < rect.height; y++) {
+      const row = rect.y + y;
+      const start = (row * canvasWidth + rect.x) * 4;
+      canvas.fill(0, start, start + rect.width * 4);
+    }
+  }
+
+  return { parseGIF, lzwDecode, GifParseError };
+});
+
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.js"></script>
+<style>
+  :root{
+    --bg-app: #F1EFE9;
+    --bg-panel: #FFFFFF;
+    --bg-stage: #26251F;
+    --bg-stage-2: #201F1A;
+    --ink: #1D1B16;
+    --ink-soft: #6E6A5F;
+    --ink-faint: #9A9587;
+    --line: #E3DED2;
+    --line-soft: #EDE9DD;
+    --accent: #3B6E64;
+    --accent-hover: #2E5850;
+    --accent-soft: #E4EEEB;
+    --overlay-color: #B24C6B;
+    --overlay-soft: #F7E9EE;
+    --mask-color: #8B5CF6;
+    --mask-soft: #EFE9FD;
+    --danger: #B5482F;
+    --radius: 10px;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, Helvetica, Arial, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{
+    margin:0;
+    font-family:var(--sans);
+    color:var(--ink);
+    background:var(--bg-app);
+    -webkit-font-smoothing:antialiased;
+  }
+  .app{ display:flex; flex-direction:column; height:100vh; }
+
+  /* ---- Top bar ---- */
+  .topbar{
+    display:flex; align-items:center; gap:16px;
+    padding:12px 20px;
+    background:var(--bg-panel);
+    border-bottom:1px solid var(--line);
+    flex-shrink:0;
+  }
+  .brand{ display:flex; align-items:baseline; gap:8px; }
+  .brand .mark{
+    width:22px;height:22px; border-radius:6px;
+    background:linear-gradient(135deg, var(--accent), #6FA79A);
+    flex-shrink:0;
+  }
+  .brand h1{ font-size:15px; font-weight:650; letter-spacing:-0.01em; margin:0; }
+  .status{
+    flex:1; font-size:13px; color:var(--ink-soft);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .status.error{ color: var(--danger); }
+  .btn-export{
+    background:var(--accent); color:#fff; border:none;
+    padding:9px 18px; border-radius:8px; font-size:13.5px; font-weight:600;
+    cursor:pointer; transition:background .15s ease; white-space:nowrap;
+  }
+  .btn-export:hover{ background:var(--accent-hover); }
+  .btn-export:disabled{ background:#CFCBBD; cursor:not-allowed; }
+
+  /* ---- Body layout ---- */
+  .body{ flex:1; display:flex; min-height:0; }
+
+  /* ---- Sidebar ---- */
+  .sidebar{
+    width:328px; flex-shrink:0;
+    background:var(--bg-panel);
+    border-right:1px solid var(--line);
+    overflow-y:auto;
+    padding:6px 0 40px;
+  }
+  .panel{ padding:16px 18px; border-bottom:1px solid var(--line-soft); }
+  .panel h2{
+    font-size:11.5px; font-weight:700; letter-spacing:.03em;
+    color:var(--ink-soft); margin:0 0 12px;
+    display:flex; align-items:center; justify-content:space-between;
+  }
+  .field-row{ display:flex; gap:8px; margin-bottom:10px; }
+  .field{ flex:1; display:flex; flex-direction:column; gap:4px; margin-bottom:10px; }
+  .field:last-child{ margin-bottom:0; }
+  .field label{ font-size:11px; color:var(--ink-faint); }
+  .field-label{ display:flex; justify-content:space-between; font-size:11px; color:var(--ink-faint); }
+  .field-label b{ font-family:var(--mono); font-weight:600; color:var(--ink-soft); }
+  .field input[type=number]{
+    font-family:var(--mono); font-size:13px; font-variant-numeric:tabular-nums;
+    padding:6px 8px; border:1px solid var(--line); border-radius:6px;
+    width:100%; background:#fff; color:var(--ink);
+  }
+  .field input[type=number]:focus{ outline:2px solid var(--accent-soft); border-color:var(--accent); }
+  .field input[type=range]{ width:100%; accent-color:var(--accent); }
+
+  .row-buttons{ display:flex; gap:8px; }
+  .btn{
+    font-family:inherit; font-size:12.5px; font-weight:600;
+    padding:8px 12px; border-radius:7px; border:1px solid var(--line);
+    background:#fff; color:var(--ink); cursor:pointer; transition:all .12s ease;
+  }
+  .btn:hover{ border-color:var(--ink-faint); }
+  .btn.primary{ background:var(--accent-soft); border-color:var(--accent); color:var(--accent-hover); }
+  .btn.primary.active{ background:var(--accent); color:#fff; }
+  .btn.block{ width:100%; }
+  .btn:disabled{ opacity:.45; cursor:not-allowed; }
+
+  .dropzone{
+    border:1.5px dashed var(--line); border-radius:var(--radius);
+    padding:26px 14px; text-align:center; cursor:pointer;
+    transition:border-color .15s ease, background .15s ease;
+  }
+  .dropzone:hover, .dropzone.drag{ border-color:var(--accent); background:var(--accent-soft); }
+  .dropzone p{ margin:8px 0 0; font-size:12.5px; color:var(--ink-soft); }
+  .dropzone .icon{ font-size:22px; display:block; }
+  .hint{ font-size:11.5px; color:var(--ink-faint); margin-top:8px; line-height:1.5; }
+  .file-input{ display:none; }
+
+  /* toggle switch (mini) */
+  .switch{
+    width:32px; height:18px; border-radius:10px; background:var(--line);
+    position:relative; cursor:pointer; flex-shrink:0; transition:background .15s;
+  }
+  .switch::after{
+    content:""; position:absolute; top:2px; left:2px; width:14px; height:14px;
+    border-radius:50%; background:#fff; transition:left .15s; box-shadow:0 1px 2px rgba(0,0,0,.25);
+  }
+  .switch.checked{ background:var(--accent); }
+  .switch.checked::after{ left:16px; }
+
+  select{
+    font-family:inherit; font-size:12.5px; padding:7px 8px;
+    border:1px solid var(--line); border-radius:7px; background:#fff; color:var(--ink); width:100%;
+  }
+
+  .checkbox-row{ display:flex; align-items:center; gap:8px; font-size:12px; color:var(--ink-soft); margin-top:6px; }
+
+  .section-body{ transition: opacity .12s; }
+  .section-body.disabled{ opacity:.4; pointer-events:none; }
+
+  /* shape grid (mask panel) */
+  .shape-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin-bottom:10px; }
+  .shape-btn{
+    aspect-ratio:1; background:#fff; border:1.5px solid var(--line); border-radius:7px;
+    cursor:pointer; display:flex; align-items:center; justify-content:center; padding:6px;
+  }
+  .shape-btn:hover{ border-color:var(--ink-faint); }
+  .shape-btn.active{ border-color:var(--mask-color); box-shadow:0 0 0 1.5px var(--mask-color) inset; background:var(--mask-soft); }
+  .shape-btn svg{ width:100%; height:100%; fill:var(--ink-soft); }
+  details.custom-mask{ margin-top:4px; }
+  details.custom-mask summary{ cursor:pointer; font-size:11.5px; color:var(--ink-faint); margin-bottom:6px; }
+  textarea.svgcode{
+    width:100%; min-height:60px; font-family:var(--mono); font-size:10.5px;
+    border:1px solid var(--line); border-radius:6px; padding:6px; resize:vertical;
+  }
+
+  /* layer list (overlay panel) */
+  .layer-list{ display:flex; flex-direction:column; gap:8px; margin-bottom:12px; }
+  .layer{
+    display:flex; align-items:center; gap:9px; padding:8px;
+    border:1px solid var(--line); border-radius:8px; background:#fff; cursor:pointer;
+  }
+  .layer.selected{ border-color:var(--overlay-color); background:var(--overlay-soft); }
+  .layer .thumb{
+    width:34px;height:34px; border-radius:5px;
+    background:
+      linear-gradient(45deg,#ddd 25%,transparent 25%) -6px 0/12px 12px,
+      linear-gradient(-45deg,#ddd 25%,transparent 25%) -6px 0/12px 12px,
+      linear-gradient(45deg,transparent 75%,#ddd 75%) -6px 0/12px 12px,
+      linear-gradient(-45deg,transparent 75%,#ddd 75%) -6px 0/12px 12px, #f2f2f2;
+    flex-shrink:0; display:flex;align-items:center;justify-content:center; overflow:hidden;
+  }
+  .layer .thumb img{ max-width:100%; max-height:100%; }
+  .layer .meta{ flex:1; min-width:0; }
+  .layer .meta .name{ font-size:12.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .layer .meta .opacity-row{ display:flex; align-items:center; gap:6px; margin-top:4px; }
+  .layer .meta input[type=range]{ flex:1; accent-color:var(--overlay-color); height:14px; }
+  .layer .meta .op-val{ font-size:10.5px; font-family:var(--mono); color:var(--ink-faint); width:28px; text-align:right; }
+  .layer-actions{ display:flex; flex-direction:column; gap:4px; }
+  .icon-btn{
+    width:22px;height:22px; border:none; background:transparent; color:var(--ink-faint);
+    cursor:pointer; border-radius:4px; font-size:12px; line-height:1;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .icon-btn:hover{ background:var(--line-soft); color:var(--ink); }
+  .icon-btn.danger:hover{ background:#FBE7E1; color:var(--danger); }
+
+  /* ---- Stage ---- */
+  .stage-wrap{ flex:1; display:flex; flex-direction:column; background:var(--bg-stage); min-width:0; }
+  .stage{ flex:1; display:flex; align-items:center; justify-content:center; padding:24px; min-height:0; position:relative; }
+  .empty-stage{ color:#8B8A82; text-align:center; font-size:14px; max-width:340px; }
+  .empty-stage .big{ font-size:34px; display:block; margin-bottom:10px; }
+  canvas#previewCanvas{
+    max-width:100%; max-height:100%;
+    background:
+      linear-gradient(45deg,#3a3933 25%,transparent 25%) 0 0/22px 22px,
+      linear-gradient(-45deg,#3a3933 25%,transparent 25%) 0 0/22px 22px,
+      linear-gradient(45deg,transparent 75%,#3a3933 75%) 0 0/22px 22px,
+      linear-gradient(-45deg,transparent 75%,#3a3933 75%) 0 0/22px 22px, #2c2b25;
+    background-position: 0 0, 0 11px, 11px -11px, -11px 0px;
+    border-radius:4px; box-shadow:0 12px 40px rgba(0,0,0,.4);
+    touch-action:none; cursor:default; display:none;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+  canvas#previewCanvas.loaded{ display:block; }
+
+  .transport{
+    flex-shrink:0; display:flex; align-items:center; gap:14px;
+    padding:12px 24px; background:var(--bg-stage-2); border-top:1px solid #3A392F;
+  }
+  .transport button{
+    width:34px;height:34px; border-radius:50%; border:none; background:#3A3930; color:#EDE9DD;
+    cursor:pointer; font-size:13px; display:flex;align-items:center;justify-content:center; flex-shrink:0;
+  }
+  .transport button:hover{ background:#48473C; }
+  .transport button:disabled{ opacity:.35; cursor:not-allowed; }
+  .transport input[type=range]{ flex:1; accent-color:var(--accent); }
+  .transport .frame-label{
+    font-family:var(--mono); font-size:11.5px; color:#B9B6A8; white-space:nowrap;
+    min-width:118px; text-align:right; font-variant-numeric:tabular-nums;
+  }
+
+  /* ---- Export overlay ---- */
+  .export-modal{ position:fixed; inset:0; background:rgba(20,19,15,.55); display:none; align-items:center; justify-content:center; z-index:50; }
+  .export-modal.show{ display:flex; }
+  .export-card{ background:#fff; border-radius:14px; padding:26px 28px; width:340px; text-align:center; }
+  .export-card h3{ margin:0 0 6px; font-size:15px; }
+  .export-card p{ margin:0 0 16px; font-size:12.5px; color:var(--ink-soft); }
+  .progress-track{ height:8px; background:var(--line-soft); border-radius:5px; overflow:hidden; margin-bottom:16px; }
+  .progress-fill{ height:100%; width:0%; background:var(--accent); transition:width .1s linear; }
+  .result-preview img{
+    max-width:100%; border-radius:8px; border:1px solid var(--line); margin-bottom:14px;
+    background-image:repeating-conic-gradient(#d8d8d8 0% 25%, #f4f4f4 0% 50%); background-size:18px 18px;
+  }
+  .result-actions{ display:flex; gap:8px; }
+  .result-actions a, .result-actions button{ flex:1; text-decoration:none; }
+  .download-btn{
+    display:block; background:var(--accent); color:#fff; padding:10px; border-radius:8px;
+    font-size:13px; font-weight:600;
+  }
+  .download-btn:hover{ background:var(--accent-hover); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="topbar">
+    <div class="brand">
+      <span class="mark"></span>
+      <h1>GIF Editor</h1>
+    </div>
+    <div class="status" id="statusText">Load an animated GIF to get started.</div>
+    <button class="btn-export" id="exportBtn" disabled>Export GIF</button>
+  </div>
+
+  <div class="body">
+    <div class="sidebar">
+
+      <div class="panel">
+        <h2>SOURCE</h2>
+        <div class="dropzone" id="dropzone">
+          <span class="icon">⇪</span>
+          <p><strong>Click to upload</strong> or drop a .gif here</p>
+        </div>
+        <input type="file" id="gifInput" class="file-input" accept="image/gif">
+        <div class="hint" id="gifInfo"></div>
+      </div>
+
+      <div class="panel" id="cropPanel" style="display:none;">
+        <h2>CROP</h2>
+        <div class="row-buttons" style="margin-bottom:12px;">
+          <button class="btn primary" id="cropToggle">Enable crop tool</button>
+          <button class="btn" id="cropReset">Reset</button>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>X</label><input type="number" id="cropX" min="0"></div>
+          <div class="field"><label>Y</label><input type="number" id="cropY" min="0"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Width</label><input type="number" id="cropW" min="1"></div>
+          <div class="field"><label>Height</label><input type="number" id="cropH" min="1"></div>
+        </div>
+        <div class="hint">Drag the handles on the canvas, or type exact values.</div>
+      </div>
+
+      <div class="panel" id="adjustPanel" style="display:none;">
+        <h2>ADJUST</h2>
+        <div class="field">
+          <div class="field-label"><span>Brightness</span><b id="val-brightness">100%</b></div>
+          <input type="range" id="brightness" min="0" max="200" value="100">
+        </div>
+        <div class="field">
+          <div class="field-label"><span>Contrast</span><b id="val-contrast">100%</b></div>
+          <input type="range" id="contrast" min="0" max="200" value="100">
+        </div>
+        <div class="field">
+          <div class="field-label"><span>Hue shift</span><b id="val-hue">0&deg;</b></div>
+          <input type="range" id="hue" min="0" max="360" value="0">
+        </div>
+        <div class="field">
+          <div class="field-label"><span>Saturation</span><b id="val-saturate">100%</b></div>
+          <input type="range" id="saturate" min="0" max="200" value="100">
+        </div>
+        <div class="checkbox-row">
+          <span class="switch" id="invertToggle"></span> Invert colors
+        </div>
+      </div>
+
+      <div class="panel" id="stylizePanel" style="display:none;">
+        <h2>STYLIZE</h2>
+        <div class="checkbox-row" style="margin-bottom:8px;">
+          <span class="switch" id="posterizeToggle"></span> Posterize
+        </div>
+        <div class="section-body disabled" id="posterizeBody">
+          <div class="field">
+            <div class="field-label"><span>Color levels</span><b id="val-posterizeLevels">4</b></div>
+            <input type="range" id="posterizeLevels" min="2" max="8" value="4">
+          </div>
+        </div>
+        <div class="checkbox-row" style="margin:14px 0 8px;">
+          <span class="switch" id="bitmapToggle"></span> Bitmap
+        </div>
+        <div class="section-body disabled" id="bitmapBody">
+          <div class="field">
+            <div class="field-label"><span>Threshold</span><b id="val-threshold">128</b></div>
+            <input type="range" id="threshold" min="0" max="255" value="128">
+          </div>
+          <div class="checkbox-row">
+            <span class="switch" id="ditherToggle"></span> Dither (Floyd&ndash;Steinberg)
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" id="maskPanel" style="display:none;">
+        <h2>SHAPE MASK <span class="switch" id="maskToggle"></span></h2>
+        <div class="section-body disabled" id="maskBody">
+          <div class="shape-grid" id="shapeGrid"></div>
+          <details class="custom-mask">
+            <summary>Use a custom SVG shape instead</summary>
+            <textarea class="svgcode" id="svgCode" placeholder="Paste SVG markup"></textarea>
+            <div class="row-buttons" style="margin-top:6px;">
+              <button class="btn" id="applySvgBtn">Use this SVG</button>
+            </div>
+          </details>
+          <div class="field" style="margin-top:12px;">
+            <div class="field-label"><span>Scale</span><b id="val-maskScale">100%</b></div>
+            <input type="range" id="maskScale" min="10" max="250" value="100">
+          </div>
+          <div class="field">
+            <div class="field-label"><span>Horizontal</span><b id="val-maskX">0</b></div>
+            <input type="range" id="maskX" min="-100" max="100" value="0">
+          </div>
+          <div class="field">
+            <div class="field-label"><span>Vertical</span><b id="val-maskY">0</b></div>
+            <input type="range" id="maskY" min="-100" max="100" value="0">
+          </div>
+          <div class="field">
+            <div class="field-label"><span>Rotation</span><b id="val-maskRot">0&deg;</b></div>
+            <input type="range" id="maskRot" min="0" max="360" value="0">
+          </div>
+          <div class="checkbox-row">
+            <span class="switch" id="maskInvertToggle"></span> Invert (punch a hole instead)
+          </div>
+          <div class="hint">Masking makes the exported GIF have a transparent background (hard edges — GIF transparency is all-or-nothing).</div>
+        </div>
+      </div>
+
+      <div class="panel" id="overlayPanel" style="display:none;">
+        <h2>PNG OVERLAYS</h2>
+        <button class="btn primary block" id="addOverlayBtn" style="margin-bottom:12px;">+ Add PNG overlay</button>
+        <input type="file" id="overlayInput" class="file-input" accept="image/png" multiple>
+        <div class="layer-list" id="layerList"></div>
+        <div class="hint">Select a layer to move, resize (corner handle) or rotate (top handle) it on the canvas.</div>
+      </div>
+
+      <div class="panel" id="exportPanel" style="display:none;">
+        <h2>COMPRESS &amp; EXPORT</h2>
+        <div class="field">
+          <div class="field-label"><span>Colors</span><b id="val-colors">256</b></div>
+          <input type="range" id="colors" min="2" max="256" value="256">
+        </div>
+        <div class="field">
+          <div class="field-label"><span>Output scale</span><b id="val-outScale">100%</b></div>
+          <input type="range" id="outScale" min="10" max="100" value="100">
+        </div>
+        <div class="field">
+          <div class="field-label"><span>Keep frames</span><b id="val-outFrames">100%</b></div>
+          <input type="range" id="outFrames" min="10" max="100" value="100">
+        </div>
+        <div class="field">
+          <label>Quality</label>
+          <select id="qualitySelect">
+            <option value="20">Fast (smaller file)</option>
+            <option value="10" selected>Balanced</option>
+            <option value="1">High quality (slower)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Looping</label>
+          <select id="loopSelect">
+            <option value="0" selected>Loop forever</option>
+            <option value="-1">Play once</option>
+          </select>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="stage-wrap">
+      <div class="stage" id="stage">
+        <div class="empty-stage" id="emptyStage">
+          <span class="big">🎞️</span>
+          Upload an animated GIF on the left. Crop, recolor, mask, and overlay it, then export a new animated GIF.
+        </div>
+        <canvas id="previewCanvas"></canvas>
+      </div>
+      <div class="transport" id="transport" style="display:none;">
+        <button id="playBtn">▶</button>
+        <input type="range" id="frameSlider" min="0" max="0" value="0" step="1">
+        <div class="frame-label" id="frameLabel">Frame 0/0</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="export-modal" id="exportModal">
+  <div class="export-card">
+    <div id="exportProgressView">
+      <h3>Rendering your GIF</h3>
+      <p id="exportProgressText">Compositing frames…</p>
+      <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+      <button class="btn block" id="cancelExportBtn">Cancel</button>
+    </div>
+    <div id="exportResultView" style="display:none;">
+      <h3>Your GIF is ready</h3>
+      <p id="exportResultMeta"></p>
+      <div class="result-preview"><img id="resultImg" alt="Exported GIF preview"></div>
+      <div class="result-actions">
+        <a class="download-btn" id="downloadLink" download="edited.gif">Download</a>
+      </div>
+      <button class="btn block" id="closeExportBtn" style="margin-top:8px;">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* =========================================================
+     SHAPE PRESETS (viewBox 0 0 100 100) — from gif-shape-cutter
+  ========================================================= */
+  const SHAPE_PRESETS = {
+    circle: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="45"/></svg>`,
+    square: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect x="8" y="8" width="84" height="84" rx="20" ry="20"/></svg>`,
+    heart: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M50,88 C20,65 5,45 5,28 C5,12 18,2 32,2 C40,2 47,6 50,14 C53,6 60,2 68,2 C82,2 95,12 95,28 C95,45 80,65 50,88 Z"/></svg>`,
+    star: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M50,5 L60.58,35.44 L92.75,36.09 L67.12,55.56 L76.45,86.41 L50,68 L23.55,86.41 L32.88,55.56 L7.2,36.09 L39.42,35.44 Z"/></svg>`,
+    hexagon: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M50,5 L88.97,27.5 L88.97,72.5 L50,95 L11.03,72.5 L11.03,27.5 Z"/></svg>`,
+    blob: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M50,10 C70,5 95,25 90,50 C95,75 70,95 50,90 C30,95 5,75 10,50 C5,25 30,5 50,10 Z"/></svg>`,
+    bubble: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect x="5" y="5" width="90" height="70" rx="16" ry="16"/><polygon points="20,70 15,95 42,70"/></svg>`,
+    arrow: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><polygon points="8,35 60,35 60,15 95,50 60,85 60,65 8,65"/></svg>`
+  };
+
+  /* =========================================================
+     PIXEL OPS — posterize / bitmap+dither (from gifsmith),
+     median-cut palette quantization (from gif-compressor)
+  ========================================================= */
+
+  function applyPosterize(imgData, levels){
+    const d = imgData.data;
+    const step = 255 / (levels - 1);
+    for(let i=0;i<d.length;i+=4){
+      d[i]   = Math.round(Math.round(d[i]/step)*step);
+      d[i+1] = Math.round(Math.round(d[i+1]/step)*step);
+      d[i+2] = Math.round(Math.round(d[i+2]/step)*step);
+    }
+    return imgData;
+  }
+
+  function applyBitmap(imgData, w, h, threshold, dither){
+    const d = imgData.data;
+    const gray = new Float32Array(w*h);
+    for(let i=0,p=0;i<d.length;i+=4,p++) gray[p] = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+    if(dither){
+      for(let y=0;y<h;y++){
+        for(let x=0;x<w;x++){
+          const idx = y*w+x;
+          const old = gray[idx];
+          const val = old < threshold ? 0 : 255;
+          const err = old - val;
+          gray[idx] = val;
+          if(x+1<w) gray[idx+1] += err*7/16;
+          if(y+1<h){
+            if(x>0) gray[idx+w-1] += err*3/16;
+            gray[idx+w] += err*5/16;
+            if(x+1<w) gray[idx+w+1] += err*1/16;
+          }
+        }
+      }
+    } else {
+      for(let i=0;i<gray.length;i++) gray[i] = gray[i] < threshold ? 0 : 255;
+    }
+    for(let i=0,p=0;i<d.length;i+=4,p++){
+      const v = gray[p] < 128 ? 0 : 255;
+      d[i] = d[i+1] = d[i+2] = v;
+    }
+    return imgData;
+  }
+
+  function quantizeMedianCut(pixels, maxColors){
+    let boxes = [{ pixels: [] }];
+    const pts = [];
+    for(let i=0;i<pixels.length;i+=3) pts.push([pixels[i], pixels[i+1], pixels[i+2]]);
+    boxes[0].pixels = pts;
+
+    function boxRange(box){
+      let rmin=255,rmax=0,gmin=255,gmax=0,bmin=255,bmax=0;
+      for(const p of box.pixels){
+        if(p[0]<rmin) rmin=p[0]; if(p[0]>rmax) rmax=p[0];
+        if(p[1]<gmin) gmin=p[1]; if(p[1]>gmax) gmax=p[1];
+        if(p[2]<bmin) bmin=p[2]; if(p[2]>bmax) bmax=p[2];
+      }
+      return {rmin,rmax,gmin,gmax,bmin,bmax};
+    }
+    function splitBox(box){
+      const {rmin,rmax,gmin,gmax,bmin,bmax} = boxRange(box);
+      const rr=rmax-rmin, rg=gmax-gmin, rb=bmax-bmin;
+      let axis = 0;
+      if(rg>=rr && rg>=rb) axis=1; else if(rb>=rr && rb>=rg) axis=2;
+      box.pixels.sort((a,b)=>a[axis]-b[axis]);
+      const mid = Math.floor(box.pixels.length/2);
+      return [{pixels:box.pixels.slice(0,mid)}, {pixels:box.pixels.slice(mid)}];
+    }
+    while(boxes.length < maxColors){
+      let idx=-1, best=1;
+      for(let i=0;i<boxes.length;i++){ if(boxes[i].pixels.length>best){ best=boxes[i].pixels.length; idx=i; } }
+      if(idx===-1) break;
+      const [b1,b2] = splitBox(boxes[idx]);
+      boxes.splice(idx,1,b1,b2);
+    }
+    const palette = boxes.filter(b=>b.pixels.length>0).map(box=>{
+      let r=0,g=0,b=0;
+      for(const p of box.pixels){ r+=p[0]; g+=p[1]; b+=p[2]; }
+      const n = box.pixels.length;
+      return [Math.round(r/n), Math.round(g/n), Math.round(b/n)];
+    });
+    return palette.length ? palette : [[0,0,0]];
+  }
+
+  function nearestColorIndex(palette, r, g, b){
+    let best=0, bestDist=Infinity;
+    for(let i=0;i<palette.length;i++){
+      const p = palette[i];
+      const dr=p[0]-r, dg=p[1]-g, db=p[2]-b;
+      const dist = dr*dr+dg*dg+db*db;
+      if(dist<bestDist){ bestDist=dist; best=i; }
+    }
+    return best;
+  }
+
+  /* =========================================================
+     APP STATE
+  ========================================================= */
+
+  const state = {
+    width:0, height:0,
+    sourceCanvases: [],   // per source frame, full-size canvas of raw decoded pixels (immutable per load)
+    delays: [],           // per source frame, ms
+    baseFrames: [],       // per source frame, full-size canvas AFTER adjust/posterize/bitmap/mask (recomputed on those changes)
+    crop: { x:0, y:0, w:0, h:0 },
+    cropMode: false,
+    adjust: { brightness:100, contrast:100, hue:0, saturate:100, invert:false },
+    posterize: { enabled:false, levels:4 },
+    bitmap: { enabled:false, threshold:128, dither:false },
+    mask: { enabled:false, shapeKey:"circle", svgText: SHAPE_PRESETS.circle, img:null, scale:100, x:0, y:0, rotation:0, invert:false },
+    overlays: [],          // [{id, img, name, x,y,w,h, rot, opacity}]  -- coords in FULL (pre-crop) frame space
+    selectedId: null,
+    nextOverlayId: 1,
+    currentFrame: 0,
+    playing: false,
+    playTimer: null,
+    drag: null,
+    workerUrl: null,
+    reprocessHandle: null,
+  };
+
+  const el = {};
+  ["statusText","dropzone","gifInput","gifInfo",
+   "cropPanel","cropToggle","cropReset","cropX","cropY","cropW","cropH",
+   "adjustPanel","brightness","contrast","hue","saturate","invertToggle",
+   "stylizePanel","posterizeToggle","posterizeBody","posterizeLevels",
+   "bitmapToggle","bitmapBody","threshold","ditherToggle",
+   "maskPanel","maskToggle","maskBody","shapeGrid","svgCode","applySvgBtn",
+   "maskScale","maskX","maskY","maskRot","maskInvertToggle",
+   "overlayPanel","addOverlayBtn","overlayInput","layerList",
+   "exportPanel","colors","outScale","outFrames","qualitySelect","loopSelect","exportBtn",
+   "stage","emptyStage","canvas:previewCanvas","transport","playBtn","frameSlider","frameLabel",
+   "exportModal","exportProgressView","exportResultView","exportProgressText","progressFill",
+   "cancelExportBtn","closeExportBtn","resultImg","downloadLink","exportResultMeta"
+  ].forEach(key => {
+    const id = key.indexOf(":") >= 0 ? key.split(":")[1] : key;
+    const name = key.indexOf(":") >= 0 ? key.split(":")[0] : key;
+    el[name] = document.getElementById(id);
+  });
+  const ctx = el.canvas.getContext("2d");
+
+  function setStatus(msg, isError){
+    el.statusText.textContent = msg;
+    el.statusText.classList.toggle("error", !!isError);
+  }
+
+  function val(id){ return document.getElementById(id); }
+
+  /* =========================================================
+     TOGGLE SWITCHES (plain JS state, no hidden checkboxes)
+  ========================================================= */
+  const toggles = {};
+  function createToggle(elId, onChange, sectionBodyId){
+    const node = document.getElementById(elId);
+    let checked = false;
+    function apply(){
+      node.classList.toggle("checked", checked);
+      if(sectionBodyId) document.getElementById(sectionBodyId).classList.toggle("disabled", !checked);
+    }
+    node.addEventListener("click", () => { checked = !checked; apply(); onChange(checked); });
+    const api = {
+      get value(){ return checked; },
+      set(v){ checked = !!v; apply(); }
+    };
+    toggles[elId] = api;
+    return api;
+  }
+
+  /* =========================================================
+     LOAD GIF
+  ========================================================= */
+
+  el.dropzone.addEventListener("click", () => el.gifInput.click());
+  el.dropzone.addEventListener("dragover", e => { e.preventDefault(); el.dropzone.classList.add("drag"); });
+  el.dropzone.addEventListener("dragleave", () => el.dropzone.classList.remove("drag"));
+  el.dropzone.addEventListener("drop", e => {
+    e.preventDefault();
+    el.dropzone.classList.remove("drag");
+    if(e.dataTransfer.files.length) loadGifFile(e.dataTransfer.files[0]);
+  });
+  el.gifInput.addEventListener("change", e => {
+    if(e.target.files.length) loadGifFile(e.target.files[0]);
+  });
+
+  function loadGifFile(file){
+    if(!/image\/gif|\.gif$/i.test(file.type) && !/\.gif$/i.test(file.name)){
+      setStatus("Please choose a .gif file.", true);
+      return;
+    }
+    setStatus("Decoding \u201c" + file.name + "\u201d\u2026");
+    const reader = new FileReader();
+    reader.onload = () => {
+      try{
+        const gif = GifDecoder.parseGIF(reader.result);
+
+        state.width = gif.width;
+        state.height = gif.height;
+        state.delays = gif.frames.map(f => f.delay);
+        state.sourceCanvases = gif.frames.map(f => {
+          const c = document.createElement("canvas");
+          c.width = gif.width; c.height = gif.height;
+          c.getContext("2d").putImageData(new ImageData(f.composited, gif.width, gif.height), 0, 0);
+          return c;
+        });
+
+        state.crop = { x:0, y:0, w: gif.width, h: gif.height };
+        state.cropMode = false;
+        // Mutate these in place rather than reassigning — the sliders were
+        // wired up once at page-init with a reference to these exact
+        // objects (bindRange captures the object, not a live path back to
+        // `state`), so replacing them here would silently disconnect every
+        // slider from the app after the first GIF load.
+        Object.assign(state.adjust, { brightness:100, contrast:100, hue:0, saturate:100, invert:false });
+        Object.assign(state.posterize, { enabled:false, levels:4 });
+        Object.assign(state.bitmap, { enabled:false, threshold:128, dither:false });
+        state.mask.enabled = false;
+        state.overlays = [];
+        state.selectedId = null;
+        state.currentFrame = 0;
+        resetAdjustControls();
+
+        el.canvas.width = gif.width;
+        el.canvas.height = gif.height;
+        el.canvas.classList.add("loaded");
+        el.emptyStage.style.display = "none";
+        el.transport.style.display = "flex";
+        el.cropPanel.style.display = "block";
+        el.adjustPanel.style.display = "block";
+        el.stylizePanel.style.display = "block";
+        el.maskPanel.style.display = "block";
+        el.overlayPanel.style.display = "block";
+        el.exportPanel.style.display = "block";
+        el.exportBtn.disabled = false;
+
+        el.frameSlider.max = gif.frames.length - 1;
+        el.frameSlider.value = 0;
+
+        el.gifInfo.textContent = gif.width + "\u00d7" + gif.height + " \u00b7 " + gif.frames.length + " frame" + (gif.frames.length===1?"":"s");
+
+        syncCropFields();
+        setStatus("Loaded " + gif.frames.length + " frames at " + gif.width + "\u00d7" + gif.height + ".");
+        stopPlayback();
+        reprocessBaseFrames();
+        startPlayback();
+      } catch(err){
+        console.error(err);
+        setStatus("Couldn't read that GIF: " + err.message, true);
+      }
+    };
+    reader.onerror = () => setStatus("Failed to read the file.", true);
+    reader.readAsArrayBuffer(file);
+  }
+
+  /* =========================================================
+     BASE FRAME PIPELINE — adjust -> posterize -> bitmap -> mask
+     Runs on the FULL (uncropped) canvas. Crop and overlays are
+     applied later, per-render, so dragging them doesn't require
+     redoing these (more expensive) pixel operations.
+  ========================================================= */
+
+  let scratch = null;
+  function reprocessBaseFrames(){
+    if(!state.sourceCanvases.length) return;
+    const W = state.width, H = state.height;
+    if(!scratch){ scratch = document.createElement("canvas"); }
+    scratch.width = W; scratch.height = H;
+    const sctx = scratch.getContext("2d", { willReadFrequently:true });
+
+    const a = state.adjust;
+    const filterParts = [
+      `brightness(${a.brightness}%)`,
+      `contrast(${a.contrast}%)`,
+      `saturate(${a.saturate}%)`
+    ];
+    if(a.hue !== 0) filterParts.push(`hue-rotate(${a.hue}deg)`);
+    if(a.invert) filterParts.push("invert(1)");
+    const filterStr = filterParts.join(" ");
+
+    state.baseFrames = state.sourceCanvases.map(srcCanvas => {
+      sctx.clearRect(0,0,W,H);
+      sctx.filter = filterStr;
+      sctx.drawImage(srcCanvas, 0, 0);
+      sctx.filter = "none";
+
+      if(state.posterize.enabled || state.bitmap.enabled){
+        let imgData = sctx.getImageData(0,0,W,H);
+        if(state.posterize.enabled) imgData = applyPosterize(imgData, state.posterize.levels);
+        if(state.bitmap.enabled) imgData = applyBitmap(imgData, W, H, state.bitmap.threshold, state.bitmap.dither);
+        sctx.putImageData(imgData, 0, 0);
+      }
+
+      if(state.mask.enabled && state.mask.img){
+        sctx.globalCompositeOperation = state.mask.invert ? "destination-out" : "destination-in";
+        drawMaskShape(sctx, W, H);
+        sctx.globalCompositeOperation = "source-over";
+      }
+
+      const out = document.createElement("canvas");
+      out.width = W; out.height = H;
+      out.getContext("2d").drawImage(scratch, 0, 0);
+      return out;
+    });
+
+    renderStage();
+  }
+
+  function scheduleReprocess(){
+    if(state.reprocessHandle) clearTimeout(state.reprocessHandle);
+    state.reprocessHandle = setTimeout(reprocessBaseFrames, 30);
+  }
+
+  function drawMaskShape(dctx, w, h){
+    if(!state.mask.img) return;
+    const m = state.mask;
+    const baseSize = Math.min(w,h) * 0.9 * (m.scale/100);
+    const ratio = (state.mask.img.naturalWidth / state.mask.img.naturalHeight) || 1;
+    let drawW = baseSize, drawH = baseSize;
+    if(ratio > 1) drawH = baseSize/ratio; else drawW = baseSize*ratio;
+    const cx = w/2 + (m.x/100)*w;
+    const cy = h/2 + (m.y/100)*h;
+    dctx.save();
+    dctx.translate(cx, cy);
+    dctx.rotate(m.rotation * Math.PI/180);
+    dctx.drawImage(state.mask.img, -drawW/2, -drawH/2, drawW, drawH);
+    dctx.restore();
+  }
+
+  /* =========================================================
+     PLAYBACK
+  ========================================================= */
+
+  function startPlayback(){
+    state.playing = true;
+    el.playBtn.textContent = "\u23f8";
+    scheduleNextFrame();
+  }
+  function stopPlayback(){
+    state.playing = false;
+    el.playBtn.textContent = "\u25b6";
+    if(state.playTimer){ clearTimeout(state.playTimer); state.playTimer = null; }
+  }
+  function scheduleNextFrame(){
+    if(!state.playing) return;
+    const delay = state.delays[state.currentFrame] || 100;
+    state.playTimer = setTimeout(() => {
+      state.currentFrame = (state.currentFrame + 1) % state.baseFrames.length;
+      el.frameSlider.value = state.currentFrame;
+      renderStage();
+      scheduleNextFrame();
+    }, delay);
+  }
+  el.playBtn.addEventListener("click", () => { if(state.playing) stopPlayback(); else startPlayback(); });
+  el.frameSlider.addEventListener("input", () => {
+    stopPlayback();
+    state.currentFrame = parseInt(el.frameSlider.value, 10);
+    renderStage();
+  });
+
+  /* =========================================================
+     RENDER STAGE — crop viewport + overlays + interaction handles
+  ========================================================= */
+
+  function renderStage(){
+    if(!state.baseFrames.length) return;
+    const c = state.crop;
+    const cw = Math.max(1, Math.round(c.w)), ch = Math.max(1, Math.round(c.h));
+    if(el.canvas.width !== cw) el.canvas.width = cw;
+    if(el.canvas.height !== ch) el.canvas.height = ch;
+
+    const frame = state.baseFrames[state.currentFrame] || state.baseFrames[0];
+    ctx.clearRect(0,0,cw,ch);
+    ctx.drawImage(frame, c.x, c.y, c.w, c.h, 0, 0, cw, ch);
+
+    state.overlays.forEach(ov => {
+      ctx.save();
+      ctx.translate(ov.x - c.x + ov.w/2, ov.y - c.y + ov.h/2);
+      ctx.rotate(ov.rot);
+      ctx.globalAlpha = ov.opacity;
+      ctx.drawImage(ov.img, -ov.w/2, -ov.h/2, ov.w, ov.h);
+      ctx.restore();
+    });
+    ctx.globalAlpha = 1;
+
+    if(state.cropMode){
+      drawCropHandles();
+    } else if(state.selectedId !== null){
+      const ov = state.overlays.find(o => o.id === state.selectedId);
+      if(ov) drawOverlayHandles(ov, c);
+    }
+
+    el.frameLabel.textContent = "Frame " + (state.currentFrame+1) + "/" + state.baseFrames.length;
+  }
+
+  function drawCropHandles(){
+    // Crop is edited in FULL-frame coordinates but the canvas is currently
+    // sized to the crop rect itself while cropMode is off; while cropMode
+    // is on we temporarily show the full frame so the crop box is visible.
+  }
+
+  function drawOverlayHandles(ov, c){
+    const cx = ov.x - c.x + ov.w/2, cy = ov.y - c.y + ov.h/2;
+    const hw = ov.w/2, hh = ov.h/2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(ov.rot);
+    ctx.strokeStyle = "#B24C6B";
+    ctx.lineWidth = Math.max(1, state.width/400);
+    ctx.strokeRect(-hw, -hh, ov.w, ov.h);
+    const hs = Math.max(4, state.width/140);
+    ctx.fillStyle = "#B24C6B";
+    [[-hw,-hh],[hw,-hh],[hw,hh],[-hw,hh]].forEach(([x,y]) => ctx.fillRect(x-hs/2, y-hs/2, hs, hs));
+    ctx.beginPath();
+    ctx.moveTo(0, -hh); ctx.lineTo(0, -hh-28);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, -hh-28, hs/2+1, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /* =========================================================
+     CROP CONTROLS
+     While crop mode is active, the canvas temporarily shows the
+     FULL frame (uncropped) so the crop box can be dragged; when
+     turned off, the canvas reverts to showing just the crop rect.
+  ========================================================= */
+
+  function syncCropFields(){
+    el.cropX.value = Math.round(state.crop.x);
+    el.cropY.value = Math.round(state.crop.y);
+    el.cropW.value = Math.round(state.crop.w);
+    el.cropH.value = Math.round(state.crop.h);
+  }
+
+  function clampCrop(){
+    const c = state.crop;
+    c.w = Math.max(4, Math.min(c.w, state.width));
+    c.h = Math.max(4, Math.min(c.h, state.height));
+    c.x = Math.max(0, Math.min(c.x, state.width - c.w));
+    c.y = Math.max(0, Math.min(c.y, state.height - c.h));
+  }
+
+  function renderCropEditView(){
+    // Full-frame view with a dimmed mask outside the crop box and drag handles.
+    const W = state.width, H = state.height;
+    if(el.canvas.width !== W) el.canvas.width = W;
+    if(el.canvas.height !== H) el.canvas.height = H;
+    const frame = state.baseFrames[state.currentFrame] || state.baseFrames[0];
+    ctx.clearRect(0,0,W,H);
+    ctx.drawImage(frame, 0, 0);
+
+    const c = state.crop;
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(0,0,W,c.y);
+    ctx.fillRect(0,c.y+c.h,W,H-c.y-c.h);
+    ctx.fillRect(0,c.y,c.x,c.h);
+    ctx.fillRect(c.x+c.w,c.y,W-c.x-c.w,c.h);
+    ctx.restore();
+
+    ctx.strokeStyle = "#3B6E64";
+    ctx.lineWidth = Math.max(1, W/300);
+    ctx.strokeRect(c.x, c.y, c.w, c.h);
+    const hs = Math.max(5, W/80);
+    ctx.fillStyle = "#3B6E64";
+    [[c.x,c.y],[c.x+c.w,c.y],[c.x+c.w,c.y+c.h],[c.x,c.y+c.h]].forEach(([x,y]) => ctx.fillRect(x-hs/2,y-hs/2,hs,hs));
+
+    el.frameLabel.textContent = "Frame " + (state.currentFrame+1) + "/" + state.baseFrames.length;
+  }
+
+  function refreshStageForMode(){
+    if(state.cropMode) renderCropEditView(); else renderStage();
+  }
+
+  [el.cropX, el.cropY, el.cropW, el.cropH].forEach(input => {
+    input.addEventListener("change", () => {
+      state.crop.x = parseFloat(el.cropX.value) || 0;
+      state.crop.y = parseFloat(el.cropY.value) || 0;
+      state.crop.w = parseFloat(el.cropW.value) || state.width;
+      state.crop.h = parseFloat(el.cropH.value) || state.height;
+      clampCrop();
+      syncCropFields();
+      refreshStageForMode();
+    });
+  });
+
+  el.cropToggle.addEventListener("click", () => {
+    state.cropMode = !state.cropMode;
+    el.cropToggle.classList.toggle("active", state.cropMode);
+    el.cropToggle.textContent = state.cropMode ? "Crop tool active" : "Enable crop tool";
+    if(state.cropMode) state.selectedId = null;
+    refreshStageForMode();
+  });
+
+  el.cropReset.addEventListener("click", () => {
+    state.crop = { x:0, y:0, w: state.width, h: state.height };
+    syncCropFields();
+    refreshStageForMode();
+  });
+
+  /* =========================================================
+     ADJUST / STYLIZE CONTROLS
+  ========================================================= */
+
+  function bindRange(id, target, key, suffix, transform){
+    const input = val(id);
+    const label = val("val-" + id);
+    input.addEventListener("input", () => {
+      const raw = Number(input.value);
+      target[key] = transform ? transform(raw) : raw;
+      if(label) label.textContent = raw + (suffix || "");
+      scheduleReprocess();
+    });
+  }
+  bindRange("brightness", state.adjust, "brightness", "%");
+  bindRange("contrast", state.adjust, "contrast", "%");
+  bindRange("hue", state.adjust, "hue", "\u00b0");
+  bindRange("saturate", state.adjust, "saturate", "%");
+  bindRange("posterizeLevels", state.posterize, "levels", "");
+  bindRange("threshold", state.bitmap, "threshold", "");
+
+  createToggle("invertToggle", checked => { state.adjust.invert = checked; scheduleReprocess(); });
+  createToggle("posterizeToggle", checked => { state.posterize.enabled = checked; scheduleReprocess(); }, "posterizeBody");
+  createToggle("bitmapToggle", checked => { state.bitmap.enabled = checked; scheduleReprocess(); }, "bitmapBody");
+  createToggle("ditherToggle", checked => { state.bitmap.dither = checked; scheduleReprocess(); });
+
+  function resetAdjustControls(){
+    val("brightness").value = 100; val("val-brightness").textContent = "100%";
+    val("contrast").value = 100; val("val-contrast").textContent = "100%";
+    val("hue").value = 0; val("val-hue").textContent = "0\u00b0";
+    val("saturate").value = 100; val("val-saturate").textContent = "100%";
+    val("posterizeLevels").value = 4; val("val-posterizeLevels").textContent = "4";
+    val("threshold").value = 128; val("val-threshold").textContent = "128";
+    toggles.invertToggle.set(false);
+    toggles.posterizeToggle.set(false);
+    toggles.bitmapToggle.set(false);
+    toggles.ditherToggle.set(false);
+    val("posterizeBody").classList.add("disabled");
+    val("bitmapBody").classList.add("disabled");
+  }
+
+  /* =========================================================
+     SHAPE MASK CONTROLS
+  ========================================================= */
+
+  function buildShapeGrid(){
+    el.shapeGrid.innerHTML = "";
+    Object.keys(SHAPE_PRESETS).forEach(key => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "shape-btn" + (key === state.mask.shapeKey ? " active" : "");
+      btn.innerHTML = SHAPE_PRESETS[key];
+      btn.title = key;
+      btn.addEventListener("click", () => {
+        state.mask.shapeKey = key;
+        setMaskSvg(SHAPE_PRESETS[key]);
+        buildShapeGrid();
+      });
+      el.shapeGrid.appendChild(btn);
+    });
+  }
+  buildShapeGrid();
+
+  function setMaskSvg(svgText){
+    state.mask.svgText = svgText;
+    const img = new Image();
+    img.onload = () => { state.mask.img = img; if(state.mask.enabled) reprocessBaseFrames(); };
+    img.onerror = () => setStatus("Couldn't parse that SVG.", true);
+    img.src = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svgText)));
+  }
+  setMaskSvg(state.mask.svgText); // preload default so first enable is instant
+
+  el.applySvgBtn.addEventListener("click", () => {
+    const text = el.svgCode.value.trim();
+    if(!text) return;
+    state.mask.shapeKey = null;
+    buildShapeGrid();
+    setMaskSvg(text);
+  });
+
+  createToggle("maskToggle", checked => { state.mask.enabled = checked; reprocessBaseFrames(); }, "maskBody");
+  bindRange("maskScale", state.mask, "scale", "%");
+  bindRange("maskX", state.mask, "x", "");
+  bindRange("maskY", state.mask, "y", "");
+  bindRange("maskRot", state.mask, "rotation", "\u00b0");
+  createToggle("maskInvertToggle", checked => { state.mask.invert = checked; scheduleReprocess(); });
+
+  /* =========================================================
+     OVERLAYS
+  ========================================================= */
+
+  el.addOverlayBtn.addEventListener("click", () => el.overlayInput.click());
+  el.overlayInput.addEventListener("change", e => {
+    Array.from(e.target.files).forEach(addOverlayFile);
+    e.target.value = "";
+  });
+
+  function addOverlayFile(file){
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const maxDim = Math.min(state.width, state.height) * 0.6;
+        let w = img.naturalWidth, h = img.naturalHeight;
+        const scale = Math.min(1, maxDim / Math.max(w,h));
+        w *= scale; h *= scale;
+        const overlay = {
+          id: state.nextOverlayId++,
+          img, name: file.name,
+          x: (state.width - w)/2, y: (state.height - h)/2,
+          w, h, rot: 0, opacity: 1
+        };
+        state.overlays.push(overlay);
+        state.selectedId = overlay.id;
+        if(state.cropMode){
+          state.cropMode = false;
+          el.cropToggle.classList.remove("active");
+          el.cropToggle.textContent = "Enable crop tool";
+        }
+        renderLayerList();
+        renderStage();
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function renderLayerList(){
+    el.layerList.innerHTML = "";
+    state.overlays.forEach(ov => {
+      const row = document.createElement("div");
+      row.className = "layer" + (ov.id === state.selectedId ? " selected" : "");
+      row.innerHTML = `
+        <div class="thumb"><img src="${ov.img.src}" alt=""></div>
+        <div class="meta">
+          <div class="name">${ov.name}</div>
+          <div class="opacity-row">
+            <input type="range" min="0" max="100" value="${Math.round(ov.opacity*100)}">
+            <span class="op-val">${Math.round(ov.opacity*100)}%</span>
+          </div>
+        </div>
+        <div class="layer-actions">
+          <button class="icon-btn danger" title="Remove">\u2715</button>
+        </div>`;
+      row.addEventListener("click", e => {
+        if(e.target.tagName === "INPUT" || e.target.tagName === "BUTTON") return;
+        state.selectedId = ov.id;
+        state.cropMode = false;
+        el.cropToggle.classList.remove("active");
+        el.cropToggle.textContent = "Enable crop tool";
+        renderLayerList();
+        renderStage();
+      });
+      row.querySelector("input[type=range]").addEventListener("input", e => {
+        ov.opacity = parseInt(e.target.value,10)/100;
+        row.querySelector(".op-val").textContent = e.target.value + "%";
+        renderStage();
+      });
+      row.querySelector(".icon-btn.danger").addEventListener("click", () => {
+        state.overlays = state.overlays.filter(o => o.id !== ov.id);
+        if(state.selectedId === ov.id) state.selectedId = null;
+        renderLayerList();
+        renderStage();
+      });
+      el.layerList.appendChild(row);
+    });
+  }
+
+  /* =========================================================
+     CANVAS POINTER INTERACTION (crop + overlay transforms)
+  ========================================================= */
+
+  function canvasPoint(e){
+    const rect = el.canvas.getBoundingClientRect();
+    const scaleX = el.canvas.width / rect.width;
+    const scaleY = el.canvas.height / rect.height;
+    return { x: (e.clientX-rect.left)*scaleX, y: (e.clientY-rect.top)*scaleY };
+  }
+
+  function hitTestCropHandle(p){
+    const c = state.crop;
+    const hs = Math.max(8, state.width/60) * 1.6;
+    const pts = [
+      {name:"tl", x:c.x, y:c.y}, {name:"tr", x:c.x+c.w, y:c.y},
+      {name:"br", x:c.x+c.w, y:c.y+c.h}, {name:"bl", x:c.x, y:c.y+c.h}
+    ];
+    for(const pt of pts){ if(Math.abs(p.x-pt.x)<hs && Math.abs(p.y-pt.y)<hs) return pt.name; }
+    if(p.x>c.x && p.x<c.x+c.w && p.y>c.y && p.y<c.y+c.h) return "body";
+    return null;
+  }
+
+  function toLocal(p, ov, c){
+    const cx = ov.x - c.x + ov.w/2, cy = ov.y - c.y + ov.h/2;
+    const dx = p.x-cx, dy = p.y-cy;
+    const cos = Math.cos(-ov.rot), sin = Math.sin(-ov.rot);
+    return { x: dx*cos - dy*sin, y: dx*sin + dy*cos };
+  }
+
+  function hitTestOverlay(p, ov, c){
+    const local = toLocal(p, ov, c);
+    const hw = ov.w/2, hh = ov.h/2;
+    const hs = Math.max(9, state.width/55) * 1.7;
+    const corners = { tl:[-hw,-hh], tr:[hw,-hh], br:[hw,hh], bl:[-hw,hh] };
+    for(const name in corners){
+      const [cxL,cyL] = corners[name];
+      if(Math.abs(local.x-cxL)<hs && Math.abs(local.y-cyL)<hs) return "resize-"+name;
+    }
+    const rotHandleLocal = { x:0, y:-hh-28 };
+    if(Math.abs(local.x-rotHandleLocal.x)<hs && Math.abs(local.y-rotHandleLocal.y)<hs) return "rotate";
+    if(local.x>-hw && local.x<hw && local.y>-hh && local.y<hh) return "move";
+    return null;
+  }
+
+  el.canvas.addEventListener("pointerdown", e => {
+    if(!state.width) return;
+    const p = canvasPoint(e);
+
+    if(state.cropMode){
+      const hit = hitTestCropHandle(p);
+      if(hit){
+        state.drag = { type:"crop-"+hit, start:p, orig:Object.assign({}, state.crop) };
+        el.canvas.setPointerCapture(e.pointerId);
+      }
+      return;
+    }
+
+    const c = state.crop;
+    if(state.selectedId !== null){
+      const ov = state.overlays.find(o => o.id === state.selectedId);
+      if(ov){
+        const hit = hitTestOverlay(p, ov, c);
+        if(hit === "move"){
+          state.drag = { type:"ov-move", start:p, orig:{x:ov.x,y:ov.y}, ov };
+          el.canvas.setPointerCapture(e.pointerId); return;
+        } else if(hit === "rotate"){
+          state.drag = { type:"ov-rotate", ov, c };
+          el.canvas.setPointerCapture(e.pointerId); return;
+        } else if(hit && hit.indexOf("resize-")===0){
+          const corner = hit.split("-")[1];
+          const cx0 = ov.x-c.x+ov.w/2, cy0 = ov.y-c.y+ov.h/2;
+          const hw = ov.w/2, hh = ov.h/2;
+          const anchorMap = { tl:[hw,hh], tr:[-hw,hh], br:[-hw,-hh], bl:[hw,-hh] };
+          state.drag = { type:"ov-resize", ov, c, c0:{x:cx0,y:cy0}, rot:ov.rot, anchorLocal:anchorMap[corner], w0:ov.w, h0:ov.h };
+          el.canvas.setPointerCapture(e.pointerId); return;
+        }
+      }
+    }
+
+    for(let i=state.overlays.length-1; i>=0; i--){
+      const ov = state.overlays[i];
+      const hit = hitTestOverlay(p, ov, c);
+      if(hit){
+        state.selectedId = ov.id;
+        renderLayerList();
+        if(hit === "move"){
+          state.drag = { type:"ov-move", start:p, orig:{x:ov.x,y:ov.y}, ov };
+          el.canvas.setPointerCapture(e.pointerId);
+        }
+        renderStage();
+        return;
+      }
+    }
+    state.selectedId = null;
+    renderLayerList();
+    renderStage();
+  });
+
+  el.canvas.addEventListener("pointermove", e => {
+    if(!state.drag) return;
+    const p = canvasPoint(e);
+    const d = state.drag;
+
+    if(d.type.indexOf("crop-")===0){
+      const kind = d.type.slice(5);
+      const dx = p.x-d.start.x, dy = p.y-d.start.y;
+      let { x,y,w,h } = d.orig;
+      if(kind === "body"){ x = d.orig.x+dx; y = d.orig.y+dy; }
+      else {
+        if(kind==="tl"){ x=d.orig.x+dx; y=d.orig.y+dy; w=d.orig.w-dx; h=d.orig.h-dy; }
+        if(kind==="tr"){ y=d.orig.y+dy; w=d.orig.w+dx; h=d.orig.h-dy; }
+        if(kind==="br"){ w=d.orig.w+dx; h=d.orig.h+dy; }
+        if(kind==="bl"){ x=d.orig.x+dx; w=d.orig.w-dx; h=d.orig.h+dy; }
+      }
+      state.crop = { x,y,w,h };
+      clampCrop();
+      syncCropFields();
+      renderCropEditView();
+    } else if(d.type === "ov-move"){
+      const dx = p.x-d.start.x, dy = p.y-d.start.y;
+      d.ov.x = d.orig.x+dx; d.ov.y = d.orig.y+dy;
+      renderStage();
+    } else if(d.type === "ov-rotate"){
+      const cx = d.ov.x-d.c.x+d.ov.w/2, cy = d.ov.y-d.c.y+d.ov.h/2;
+      const ang = Math.atan2(p.y-cy, p.x-cx);
+      d.ov.rot = ang + Math.PI/2;
+      renderStage();
+    } else if(d.type === "ov-resize"){
+      const cos = Math.cos(-d.rot), sin = Math.sin(-d.rot);
+      const dx = p.x-d.c0.x, dy = p.y-d.c0.y;
+      const localP = { x: dx*cos-dy*sin, y: dx*sin+dy*cos };
+      const anchor = d.anchorLocal;
+      const newW = Math.max(8, Math.abs(localP.x-anchor[0]));
+      const newH = Math.max(8, Math.abs(localP.y-anchor[1]));
+      const midLocal = { x:(anchor[0]+localP.x)/2, y:(anchor[1]+localP.y)/2 };
+      const cosP = Math.cos(d.rot), sinP = Math.sin(d.rot);
+      const newCenter = {
+        x: d.c0.x + (midLocal.x*cosP - midLocal.y*sinP),
+        y: d.c0.y + (midLocal.x*sinP + midLocal.y*cosP)
+      };
+      d.ov.w = newW; d.ov.h = newH;
+      d.ov.x = newCenter.x - newW/2 + d.c.x;
+      d.ov.y = newCenter.y - newH/2 + d.c.y;
+      renderStage();
+    }
+  });
+
+  function endDrag(e){
+    if(state.drag){
+      try{ el.canvas.releasePointerCapture(e.pointerId); }catch(err){}
+      state.drag = null;
+    }
+  }
+  el.canvas.addEventListener("pointerup", endDrag);
+  el.canvas.addEventListener("pointercancel", endDrag);
+
+  /* =========================================================
+     COMPRESS & EXPORT CONTROLS (labels only — values read at export time)
+  ========================================================= */
+
+  val("colors").addEventListener("input", () => { val("val-colors").textContent = val("colors").value; });
+  val("outScale").addEventListener("input", () => { val("val-outScale").textContent = val("outScale").value + "%"; });
+  val("outFrames").addEventListener("input", () => { val("val-outFrames").textContent = val("outFrames").value + "%"; });
+
+  /* =========================================================
+     EXPORT
+  ========================================================= */
+
+  const KEY_COLOR = "#ff00ff";
+  const KEY_COLOR_NUM = 0xff00ff;
+
+  function getWorkerBlobUrl(){
+    if(state.workerUrl) return Promise.resolve(state.workerUrl);
+    return fetch("https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js")
+      .then(r => { if(!r.ok) throw new Error("worker fetch failed"); return r.blob(); })
+      .then(blob => { state.workerUrl = URL.createObjectURL(blob); return state.workerUrl; });
+  }
+
+  let currentGif = null;
+
+  el.exportBtn.addEventListener("click", async () => {
+    stopPlayback();
+    el.exportModal.classList.add("show");
+    el.exportProgressView.style.display = "block";
+    el.exportResultView.style.display = "none";
+    el.progressFill.style.width = "0%";
+    el.exportProgressText.textContent = "Preparing\u2026";
+
+    try{
+      const workerUrl = await getWorkerBlobUrl();
+
+      const quality = parseInt(el.qualitySelect.value, 10);
+      const loop = parseInt(el.loopSelect.value, 10);
+      const colorCount = parseInt(val("colors").value, 10);
+      const scalePct = parseInt(val("outScale").value, 10) / 100;
+      const framePct = parseInt(val("outFrames").value, 10) / 100;
+
+      const c = state.crop;
+      const finalW = Math.max(1, Math.round(c.w * scalePct));
+      const finalH = Math.max(1, Math.round(c.h * scalePct));
+
+      // ---- pick evenly-spaced frames, summing delays of skipped ones ----
+      const totalFrames = state.baseFrames.length;
+      const keep = Math.max(1, Math.round(totalFrames * framePct));
+      const boundaries = [];
+      for(let i=0;i<=keep;i++) boundaries.push(Math.floor(i*totalFrames/keep));
+
+      el.exportProgressText.textContent = "Compositing frames\u2026";
+      await sleep(0);
+
+      const compCanvas = document.createElement("canvas");
+      compCanvas.width = finalW; compCanvas.height = finalH;
+      const compCtx = compCanvas.getContext("2d");
+      const preSnapCanvas = document.createElement("canvas");
+      preSnapCanvas.width = finalW; preSnapCanvas.height = finalH;
+      const preSnapCtx = preSnapCanvas.getContext("2d");
+      // Bitmap mode produces pure black/white pixels; smooth interpolation
+      // while scaling would reintroduce gray at every edge and defeat the
+      // point of the effect, so keep resizes crisp when it's on.
+      if(state.bitmap.enabled){ compCtx.imageSmoothingEnabled = false; preSnapCtx.imageSmoothingEnabled = false; }
+
+      const composedFrames = []; // {imageData, delay}
+      for(let i=0;i<keep;i++){
+        const start = boundaries[i], end = boundaries[i+1];
+        const srcIdx = start;
+        let delaySum = 0;
+        for(let j=start;j<end;j++) delaySum += (state.delays[j] || 100);
+        delaySum = Math.max(20, Math.round(delaySum));
+
+        const target = state.mask.enabled ? preSnapCtx : compCtx;
+        target.clearRect(0,0,finalW,finalH);
+        target.drawImage(state.baseFrames[srcIdx], c.x, c.y, c.w, c.h, 0, 0, finalW, finalH);
+        state.overlays.forEach(ov => {
+          target.save();
+          target.translate((ov.x-c.x)*scalePct, (ov.y-c.y)*scalePct);
+          target.translate(ov.w*scalePct/2, ov.h*scalePct/2);
+          target.rotate(ov.rot);
+          target.globalAlpha = ov.opacity;
+          target.drawImage(ov.img, -ov.w*scalePct/2, -ov.h*scalePct/2, ov.w*scalePct, ov.h*scalePct);
+          target.restore();
+        });
+        target.globalAlpha = 1;
+
+        if(state.mask.enabled){
+          // Snap alpha to hard 0/255 (GIF transparency is all-or-nothing),
+          // then composite onto the chroma-key background gif.js will punch out.
+          const imgData = preSnapCtx.getImageData(0,0,finalW,finalH);
+          const d = imgData.data;
+          for(let p=3;p<d.length;p+=4) d[p] = d[p] < 128 ? 0 : 255;
+          preSnapCtx.putImageData(imgData, 0, 0);
+
+          compCtx.clearRect(0,0,finalW,finalH);
+          compCtx.fillStyle = KEY_COLOR;
+          compCtx.fillRect(0,0,finalW,finalH);
+          compCtx.drawImage(preSnapCanvas, 0, 0);
+        }
+
+        composedFrames.push({ imageData: compCtx.getImageData(0,0,finalW,finalH), delay: delaySum });
+        if(i % 3 === 0) await sleep(0);
+      }
+
+      // ---- optional palette reduction on top of whatever gif.js does internally ----
+      if(colorCount < 256){
+        el.exportProgressText.textContent = "Reducing palette\u2026";
+        await sleep(0);
+        const samples = [];
+        const targetSamples = 20000;
+        const totalPixels = composedFrames.length * finalW * finalH;
+        const stride = Math.max(1, Math.floor(totalPixels/targetSamples));
+        let counter = 0;
+        for(const f of composedFrames){
+          const d = f.imageData.data;
+          for(let p=0;p<finalW*finalH;p++){
+            if(counter % stride === 0){
+              const o = p*4;
+              if(d[o+3] > 0) samples.push(d[o], d[o+1], d[o+2]);
+            }
+            counter++;
+          }
+        }
+        const palette = quantizeMedianCut(samples.length ? samples : [0,0,0], colorCount);
+        const cache = new Map();
+        function paletteRGB(r,g,b){
+          const key = (r<<16)|(g<<8)|b;
+          let idx = cache.get(key);
+          if(idx === undefined){ idx = nearestColorIndex(palette, r,g,b); cache.set(key, idx); }
+          return palette[idx];
+        }
+        composedFrames.forEach(f => {
+          const d = f.imageData.data;
+          for(let o=0; o<d.length; o+=4){
+            if(d[o+3] === 0) continue;
+            const c2 = paletteRGB(d[o], d[o+1], d[o+2]);
+            d[o]=c2[0]; d[o+1]=c2[1]; d[o+2]=c2[2];
+          }
+        });
+      }
+
+      el.exportProgressText.textContent = "Encoding frames\u2026";
+      await sleep(0);
+
+      const gifOpts = {
+        workers: 3, quality, repeat: loop,
+        width: finalW, height: finalH, workerScript: workerUrl
+      };
+      if(state.mask.enabled) gifOpts.transparent = KEY_COLOR_NUM;
+      const gif = new GIF(gifOpts);
+      currentGif = gif;
+
+      const outCanvas = document.createElement("canvas");
+      outCanvas.width = finalW; outCanvas.height = finalH;
+      const outCtx = outCanvas.getContext("2d");
+      composedFrames.forEach(f => {
+        outCtx.putImageData(f.imageData, 0, 0);
+        gif.addFrame(outCtx, { delay: f.delay, copy: true });
+      });
+
+      gif.on("progress", p => { el.progressFill.style.width = Math.round(p*100) + "%"; });
+      gif.on("finished", blob => {
+        const url = URL.createObjectURL(blob);
+        el.exportProgressView.style.display = "none";
+        el.exportResultView.style.display = "block";
+        el.resultImg.src = url;
+        el.downloadLink.href = url;
+        const sizeKB = Math.round(blob.size/1024);
+        el.exportResultMeta.textContent = finalW + "\u00d7" + finalH + " \u00b7 " + composedFrames.length + " frames \u00b7 " + sizeKB + " KB";
+        setStatus("Export complete \u2014 " + sizeKB + " KB.");
+        currentGif = null;
+      });
+      gif.render();
+
+    } catch(err){
+      console.error(err);
+      el.exportModal.classList.remove("show");
+      setStatus("Export failed: " + err.message, true);
+    }
+  });
+
+  function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+  el.cancelExportBtn.addEventListener("click", () => {
+    if(currentGif){ try{ currentGif.abort(); }catch(e){} currentGif = null; }
+    el.exportModal.classList.remove("show");
+  });
+  el.closeExportBtn.addEventListener("click", () => { el.exportModal.classList.remove("show"); });
+
+})();
+</script>
+</body>
+</html>

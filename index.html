@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Contact Sheet — a home for the tools</title>
+<style>
+  :root{
+    --paper: #EAE5D9;
+    --paper-deep: #DED6C3;
+    --ink: #211E1A;
+    --ink-70: #4c473f;
+    --ink-50: #726c60;
+    --rust: #A63C22;
+    --moss: #545F3E;
+    --line: #C7BEA8;
+    --line-soft: #D9D1BC;
+    --serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+  }
+
+  *{ box-sizing: border-box; }
+
+  html{ background: var(--paper); }
+
+  body{
+    margin: 0;
+    background: var(--paper);
+    background-image:
+      radial-gradient(rgba(33,30,26,0.035) 1px, transparent 1px);
+    background-size: 3px 3px;
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a{ color: inherit; }
+
+  .wrap{
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 0 32px;
+  }
+
+  /* ---------- Header ---------- */
+
+  header{
+    padding: 64px 0 40px;
+    opacity: 0;
+    animation: rise 0.7s ease-out forwards;
+  }
+
+  @keyframes rise{
+    from{ opacity: 0; transform: translateY(10px); }
+    to{ opacity: 1; transform: translateY(0); }
+  }
+
+  @media (prefers-reduced-motion: reduce){
+    header{ animation: none; opacity: 1; }
+  }
+
+  .kicker{
+    font-family: var(--mono);
+    font-size: 12.5px;
+    letter-spacing: 0.02em;
+    color: var(--rust);
+    margin: 0 0 14px;
+  }
+
+  h1{
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 52px;
+    line-height: 1.05;
+    margin: 0 0 18px;
+    max-width: 11ch;
+    letter-spacing: -0.01em;
+  }
+
+  header p.lede{
+    font-size: 17px;
+    color: var(--ink-70);
+    max-width: 52ch;
+    margin: 0 0 28px;
+  }
+
+  .jump{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 22px;
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+
+  .jump a{
+    text-decoration: none;
+    color: var(--ink);
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 2px;
+  }
+
+  .jump a:hover{
+    border-bottom-color: var(--rust);
+    color: var(--rust);
+  }
+
+  /* ---------- Section headers ---------- */
+
+  section{
+    padding: 44px 0 8px;
+  }
+
+  .section-head{
+    display: flex;
+    align-items: baseline;
+    gap: 18px;
+    margin-bottom: 26px;
+  }
+
+  .section-head h2{
+    font-family: var(--serif);
+    font-style: italic;
+    font-weight: 400;
+    font-size: 23px;
+    margin: 0;
+    white-space: nowrap;
+  }
+
+  .section-head .rule{
+    flex: 1;
+    height: 1px;
+    background: var(--line);
+  }
+
+  .section-head .count{
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-50);
+    white-space: nowrap;
+  }
+
+  .section-note{
+    font-size: 14.5px;
+    color: var(--ink-70);
+    max-width: 62ch;
+    margin: -12px 0 26px;
+  }
+
+  /* ---------- Cards / frames ---------- */
+
+  .grid{
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 22px;
+    padding-bottom: 8px;
+  }
+
+  .frame{
+    position: relative;
+    background: var(--paper-deep);
+    border: 1px solid var(--line);
+    padding: 22px 22px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+
+  .frame:hover{
+    border-color: var(--ink-50);
+    transform: translateY(-2px);
+  }
+
+  /* photo-corner mounts */
+  .frame::before,
+  .frame::after{
+    content: "";
+    position: absolute;
+    width: 0;
+    height: 0;
+    border-style: solid;
+  }
+  .frame::before{
+    top: -1px; left: -1px;
+    border-width: 14px 14px 0 0;
+    border-color: var(--ink) transparent transparent transparent;
+  }
+  .frame::after{
+    bottom: -1px; right: -1px;
+    border-width: 0 0 14px 14px;
+    border-color: transparent transparent var(--rust) transparent;
+  }
+
+  .frame-top{
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .frame-top svg{
+    width: 34px;
+    height: 34px;
+    stroke: var(--ink);
+    fill: none;
+    stroke-width: 1.4;
+    flex-shrink: 0;
+  }
+
+  .frame-index{
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-50);
+    padding-top: 4px;
+  }
+
+  .frame h3{
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 21px;
+    margin: 0;
+  }
+
+  .frame p{
+    font-size: 14px;
+    color: var(--ink-70);
+    margin: 0;
+    flex: 1;
+  }
+
+  .frame .meta{
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-50);
+    border-top: 1px solid var(--line-soft);
+    padding-top: 10px;
+    margin-top: 2px;
+  }
+
+  .frame .open{
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--rust);
+    margin-top: 2px;
+  }
+
+  /* ---------- Footer ---------- */
+
+  footer{
+    margin-top: 56px;
+    padding: 26px 0 60px;
+    border-top: 1px solid var(--line);
+    font-size: 13px;
+    color: var(--ink-50);
+  }
+
+  @media (max-width: 560px){
+    h1{ font-size: 38px; }
+    .wrap{ padding: 0 20px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header>
+    <p class="kicker">a local toolkit, all under one roof</p>
+    <h1>Contact Sheet</h1>
+    <p class="lede">Eleven small tools for images, motion, print, file naming, and sound &mdash; each one a single self-contained page that runs entirely in your browser. Nothing you open here is ever uploaded anywhere.</p>
+    <nav class="jump">
+      <a href="#image">Image editing</a>
+      <a href="#motion">Motion &amp; GIF</a>
+      <a href="#print">Print &amp; layout</a>
+      <a href="#files">Files &amp; naming</a>
+      <a href="#sound">Sound</a>
+    </nav>
+  </header>
+
+  <section id="image">
+    <div class="section-head">
+      <h2>Image editing</h2>
+      <div class="rule"></div>
+      <span class="count">3 tools</span>
+    </div>
+    <div class="grid">
+
+      <a class="frame" href="tools/darkroom.html">
+        <div class="frame-top">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M4 8 L7 5 H10 L12 8 H21 V19 H3 V8 Z"/></svg>
+          <span class="frame-index">IMG 01</span>
+        </div>
+        <h3>Darkroom</h3>
+        <p>Crop and resize an image, then push it through an effect &mdash; adjust and cutout, duotone, posterize, a pixel-shift glitch, or a straight bitmap export.</p>
+        <div class="meta">Any image in</div>
+        <div class="open">Open Darkroom</div>
+      </a>
+
+      <a class="frame" href="tools/squeeze.html">
+        <div class="frame-top">
+          <svg viewBox="0 0 24 24"><path d="M12 3 L15 8 H9 Z"/><path d="M12 21 L9 16 H15 Z"/><line x1="12" y1="8" x2="12" y2="16"/></svg>
+          <span class="frame-index">IMG 02</span>
+        </div>
+        <h3>Squeeze</h3>
+        <p>A JPEG compressor for one image or a whole batch, with adjustable quality and a max width or height. Download everything back as a zip.</p>
+        <div class="meta">Any image in &rarr; compressed JPG out</div>
+        <div class="open">Open Squeeze</div>
+      </a>
+
+      <a class="frame" href="tools/format-swap.html">
+        <div class="frame-top">
+          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="8" height="8"/><rect x="13" y="12" width="8" height="8"/><path d="M11 8 L15 12 M15 12 L13 12 M15 12 L15 10"/></svg>
+          <span class="frame-index">IMG 03</span>
+        </div>
+        <h3>Format Swap</h3>
+        <p>Converts images between PNG, JPG, WEBP, GIF, and BMP using the browser's own canvas. JPG output has no transparency &mdash; clear areas fill white.</p>
+        <div class="meta">PNG &middot; JPG &middot; WEBP &middot; GIF &middot; BMP</div>
+        <div class="open">Open Format Swap</div>
+      </a>
+
+    </div>
+  </section>
+
+  <section id="motion">
+    <div class="section-head">
+      <h2>Motion &amp; GIF</h2>
+      <div class="rule"></div>
+      <span class="count">3 tools</span>
+    </div>
+    <div class="grid">
+
+      <a class="frame" href="tools/frame-extractor.html">
+        <div class="frame-top">
+          <svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="1"/><path d="M10 9 L15 12 L10 15 Z"/></svg>
+          <span class="frame-index">MOT 01</span>
+        </div>
+        <h3>Frame Extractor</h3>
+        <p>Pull a single still frame out of a video or GIF, or trim a clip down &mdash; optionally at a lower frame rate &mdash; and export it as a GIF or video.</p>
+        <div class="meta">Video works best in Chrome or Edge</div>
+        <div class="open">Open Frame Extractor</div>
+      </a>
+
+      <a class="frame" href="tools/gif-editor.html">
+        <div class="frame-top">
+          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16"/><path d="M3 9 H21 M3 15 H21 M9 4 V20 M15 4 V20"/></svg>
+          <span class="frame-index">MOT 02</span>
+        </div>
+        <h3>GIF Editor</h3>
+        <p>Load an animated GIF to crop it and adjust brightness, contrast, hue, and saturation, invert colors, posterize, then export the result.</p>
+        <div class="meta">Animated GIF in &rarr; animated GIF out</div>
+        <div class="open">Open GIF Editor</div>
+      </a>
+
+      <a class="frame" href="tools/gif-combiner.html">
+        <div class="frame-top">
+          <svg viewBox="0 0 24 24"><rect x="3" y="5" width="7" height="7"/><rect x="14" y="5" width="7" height="7"/><rect x="8.5" y="13" width="7" height="7"/></svg>
+          <span class="frame-index">MOT 03</span>
+        </div>
+        <h3>GIF Combiner</h3>
+        <p>Combine two or more GIFs or images into one, either playing in sequence or arranged in a grid, with a matched output size and frame timing.</p>
+        <div class="meta">GIFs &amp; images &rarr; one GIF</div>
+        <div class="open">Open GIF Combiner</div>
+      </a>
+
+    </div>
+  </section>
+
+  <section id="print">
+    <div class="section-head">
+      <h2>Print &amp; layout</h2>
+      <div class="rule"></div>
+      <span class="count">3 tools</span>
+    </div>
+    <div class="grid">
+
+      <a class="frame" href="tools/layout-studio.html">
+        <div class="frame-top">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18"/><rect x="6" y="6" width="6" height="6"/><rect x="14" y="6" width="4" height="12"/><rect x="6" y="14" width="6" height="4"/></svg>
+          <span class="frame-index">PRT 01</span>
+        </div>
+        <h3>Layout Studio</h3>
+        <p>Arrange, crop, and export image layouts onto a page you define by size, DPI, and margins &mdash; drag, resize, or use an auto-arrange preset.</p>
+        <div class="meta">Sets its own page size &amp; DPI</div>
+        <div class="open">Open Layout Studio</div>
+      </a>
+
+      <a class="frame" href="tools/print-shop.html">
+        <div class="frame-top">
+          <svg viewBox="0 0 24 24"><path d="M6 3 H18 V9 H6 Z"/><path d="M4 9 H20 V17 H4 Z"/><path d="M7 17 H17 V21 H7 Z"/></svg>
+          <span class="frame-index">PRT 02</span>
+        </div>
+        <h3>Print Shop</h3>
+        <p>Assembles a PDF from your pages &mdash; a quick merge or a structured bind &mdash; then imposes it into signatures ready for printing.</p>
+        <div class="meta">PDF pages in &rarr; imposed PDF out</div>
+        <div class="open">Open Print Shop</div>
+      </a>
+
+      <a class="frame" href="tools/tile-studio.html">
+        <div class="frame-top">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7" transform="rotate(6 17.5 6.5)"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7" transform="rotate(-6 17.5 17.5)"/></svg>
+          <span class="frame-index">PRT 03</span>
+        </div>
+        <h3>Tile Studio</h3>
+        <p>Slices an image into a grid, then lets you swap tiles in place or scatter them freely, with control over seam gap and tile tilt.</p>
+        <div class="meta">One image &rarr; a rearranged grid</div>
+        <div class="open">Open Tile Studio</div>
+      </a>
+
+    </div>
+  </section>
+
+  <section id="files">
+    <div class="section-head">
+      <h2>Files &amp; naming</h2>
+      <div class="rule"></div>
+      <span class="count">1 tool</span>
+    </div>
+    <div class="grid">
+
+      <a class="frame" href="tools/claim-and-draw.html">
+        <div class="frame-top">
+          <svg viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="11" rx="1"/><path d="M9 7 V5 H15 V7" /><line x1="8" y1="18" x2="8" y2="22" stroke-dasharray="1.5 1.8"/><line x1="16" y1="18" x2="16" y2="22" stroke-dasharray="1.5 1.8"/></svg>
+          <span class="frame-index">FIL 01</span>
+        </div>
+        <h3>Claim &amp; Draw</h3>
+        <p>Drop in a pile of files, give them a base name, and shuffle them into a random order &mdash; each one comes back renamed with a padded claim number.</p>
+        <div class="meta">Any file type &rarr; renamed copies, zipped</div>
+        <div class="open">Open Claim &amp; Draw</div>
+      </a>
+
+    </div>
+  </section>
+
+  <section id="sound">
+    <div class="section-head">
+      <h2>Sound</h2>
+      <div class="rule"></div>
+      <span class="count">1 tool</span>
+    </div>
+    <div class="grid">
+
+      <a class="frame" href="tools/audio-studio.html">
+        <div class="frame-top">
+          <svg viewBox="0 0 24 24"><path d="M4 12 H7 L10 6 V18 L13 8 V16 L16 11 V13 L20 12"/></svg>
+          <span class="frame-index">SND 01</span>
+        </div>
+        <h3>Audio Studio</h3>
+        <p>A client-side cutter and MP3 encoder. Mark cut points on the waveform, trim what you don't need, and compress the rest.</p>
+        <div class="meta">MP3 &middot; WAV &middot; M4A &middot; OGG &middot; FLAC in &rarr; MP3 out</div>
+        <div class="open">Open Audio Studio</div>
+      </a>
+
+    </div>
+  </section>
+
+  <footer>
+    Every tool on this sheet processes files locally in your browser &mdash; opening one, editing, and exporting never sends anything over the network.
+  </footer>
+
+</div>
+
+</body>
+</html>

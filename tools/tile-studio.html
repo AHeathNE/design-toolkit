@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tile Studio</title>
+<style>
+  :root {
+    --bg: #16161a;
+    --panel: #1f1f24;
+    --panel-2: #131316;
+    --border: #2e2e35;
+    --border-strong: #3d3d46;
+    --text: #f2f2f0;
+    --muted: #9a9aa2;
+    --accent: #e8e6df;
+    --accent-dim: #b9b7ae;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 30px 20px 60px; }
+  .brand { margin-bottom: 20px; }
+  .brand .name { font-size: 1.2rem; font-weight: 700; }
+  .brand .tag { font-size: 0.85rem; color: var(--muted); margin-top: 2px; }
+
+  .layout { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+  .controls {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px; width: 260px; flex-shrink: 0;
+  }
+  .drop {
+    border: 1.5px dashed var(--border-strong); border-radius: var(--radius);
+    padding: 18px 10px; text-align: center; cursor: pointer; color: var(--muted);
+    font-size: 0.82rem; margin-bottom: 16px; transition: border-color .15s, color .15s;
+  }
+  .drop:hover, .drop.drag { border-color: var(--accent); color: var(--text); }
+  input[type=file] { display: none; }
+
+  fieldset { border: 1px solid var(--border); border-radius: 10px; margin: 0 0 14px; padding: 12px 14px; }
+  legend { padding: 0 6px; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+
+  .mode-toggle { display: flex; gap: 6px; margin-bottom: 14px; }
+  .mode-toggle button {
+    flex: 1; background: var(--panel-2); border: 1px solid var(--border-strong); color: var(--muted);
+    border-radius: 8px; padding: 8px 6px; font-size: 0.82rem; cursor: pointer; font-family: inherit;
+  }
+  .mode-toggle button.active { background: var(--accent); color: #16161a; border-color: var(--accent); font-weight: 600; }
+
+  .field { margin-bottom: 12px; }
+  .field label {
+    display: flex; justify-content: space-between; font-size: 0.78rem; color: var(--muted); margin-bottom: 6px;
+  }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  input[type=number] {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 8px; font-size: 0.82rem;
+  }
+  select {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 8px; font-size: 0.82rem;
+  }
+  .row2 { display: flex; gap: 8px; }
+  .checkline { display: flex; align-items: center; gap: 8px; font-size: 0.82rem; color: var(--text); margin-bottom: 8px; }
+  .checkline input { width: 15px; height: 15px; }
+  .radioline { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--text); margin-bottom: 6px; }
+
+  button.action {
+    width: 100%; background: var(--accent); color: #16161a; border: none; border-radius: 8px;
+    padding: 9px 12px; font-size: 0.84rem; font-weight: 600; cursor: pointer; margin-top: 6px; font-family: inherit;
+  }
+  button.action:hover:not(:disabled) { opacity: 0.88; }
+  button.action:disabled { opacity: 0.35; cursor: not-allowed; }
+  button.action.secondary { background: var(--panel-2); border: 1px solid var(--border-strong); color: var(--text); }
+  button.action.secondary:hover:not(:disabled) { border-color: var(--accent); }
+
+  .hint { font-size: 0.74rem; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+  .stat-line { font-size: 0.76rem; color: var(--muted); margin-top: 4px; }
+
+  #boardWrap {
+    display: inline-block; border-radius: 10px; overflow: visible;
+    border: 1px solid var(--border); background: var(--panel);
+    min-width: 320px; min-height: 220px; position: relative;
+  }
+  #emptyState { color: var(--muted); font-size: 0.86rem; padding: 80px 30px; text-align: center; width: 460px; }
+
+  /* snap grid mode */
+  #snapGrid { display: none; line-height: 0; }
+  .snap-tile {
+    background-repeat: no-repeat; cursor: grab; position: relative;
+    outline: 2px solid transparent; outline-offset: -2px; transition: outline-color .1s;
+  }
+  .snap-tile:active { cursor: grabbing; }
+  .snap-tile.dragging { opacity: 0.35; }
+  .snap-tile.dragover { outline-color: var(--accent); }
+  .snap-tile .num {
+    position: absolute; top: 3px; left: 3px; background: rgba(0,0,0,0.55); color: #fff;
+    font-size: 10px; padding: 1px 5px; border-radius: 4px; pointer-events: none; opacity: 0; transition: opacity .1s;
+  }
+  #snapGrid:hover .num { opacity: 1; }
+
+  /* free board mode */
+  #freeOuter {
+    display: none; position: relative;
+    background: repeating-conic-gradient(#26262c 0% 25%, #202024 0% 50%) 0 0 / 20px 20px;
+  }
+  #freeInner { position: relative; transform-origin: top left; }
+  .free-tile { position: absolute; cursor: grab; outline: 1px solid rgba(255,255,255,0.25); }
+  .free-tile:active { cursor: grabbing; }
+  .free-tile canvas { display: block; width: 100%; height: 100%; pointer-events: none; }
+
+  /* purely visual grid overlay, not part of any download */
+  #gridOverlay {
+    position: absolute; top: 0; left: 0; pointer-events: none; display: none;
+    background-image:
+      linear-gradient(to right, rgba(255,255,255,0.55) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255,255,255,0.55) 1px, transparent 1px);
+    background-repeat: repeat;
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <div class="brand">
+    <div class="name">Tile Studio</div>
+    <div class="tag">Slice an image into a grid, then swap tiles in place or scatter them freely</div>
+  </div>
+
+  <div class="layout">
+    <div class="controls">
+      <div class="drop" id="drop">Click or drag an image here</div>
+      <input type="file" id="fileInput" accept="image/*">
+
+      <div class="mode-toggle">
+        <button id="modeSnapBtn" class="active">Snap grid</button>
+        <button id="modeFreeBtn">Free drag</button>
+      </div>
+
+      <fieldset>
+        <legend>Grid</legend>
+        <div class="field">
+          <label><span>Columns</span><span id="colsOut">4</span></label>
+          <input type="range" id="colsRange" min="1" max="16" step="1" value="4">
+        </div>
+        <div class="field" id="rowsField">
+          <label><span>Rows</span><span id="rowsOut">4</span></label>
+          <input type="range" id="rowsRange" min="1" max="16" step="1" value="4">
+        </div>
+        <label class="checkline"><input type="checkbox" id="ratioLock"> Lock tile ratio</label>
+        <label class="checkline"><input type="checkbox" id="gridOverlayToggle"> Show grid overlay</label>
+        <div id="ratioOptions" style="display:none;">
+          <select id="ratioPreset">
+            <option value="1/1">Square 1:1</option>
+            <option value="4/3">Landscape 4:3</option>
+            <option value="3/2">Landscape 3:2</option>
+            <option value="16/9">Wide 16:9</option>
+            <option value="3/4">Portrait 3:4</option>
+            <option value="2/3">Portrait 2:3</option>
+            <option value="9/16">Tall 9:16</option>
+            <option value="custom">Custom</option>
+          </select>
+          <div class="row2" id="customRatioRow" style="display:none; margin-top:8px;">
+            <div class="field" style="margin-bottom:0;"><label>W</label><input type="number" id="ratioW" value="1" min="0.1" step="0.1"></div>
+            <div class="field" style="margin-bottom:0;"><label>H</label><input type="number" id="ratioH" value="1" min="0.1" step="0.1"></div>
+          </div>
+        </div>
+        <div class="field" id="gapField" style="display:none; margin-top:12px;">
+          <label><span>Seam gap</span><span id="gapOut">3px</span></label>
+          <input type="range" id="gapRange" min="0" max="30" step="1" value="3">
+        </div>
+      </fieldset>
+
+      <fieldset id="tiltFieldset" style="display:none;">
+        <legend>Tilt</legend>
+        <label class="radioline"><input type="radio" name="tiltMode" value="none" checked> None</label>
+        <label class="radioline"><input type="radio" name="tiltMode" value="uniform"> Uniform</label>
+        <label class="radioline"><input type="radio" name="tiltMode" value="random"> Random</label>
+        <div class="field" style="margin-top:8px;">
+          <label><span>Max angle</span><span id="tiltOut">15&deg;</span></label>
+          <input type="range" id="tiltRange" min="0" max="45" step="1" value="15">
+        </div>
+      </fieldset>
+
+      <fieldset id="snapActions">
+        <legend>Layout</legend>
+        <div class="field">
+          <label><span>Shift row</span></label>
+          <div class="row2">
+            <input type="number" id="shiftRowIdx" value="1" min="1" style="flex:1;">
+            <button class="action secondary" id="shiftRowLeftBtn" disabled title="Shift row left" style="margin-top:0; width:auto; padding:6px 10px;">&#9664;</button>
+            <button class="action secondary" id="shiftRowRightBtn" disabled title="Shift row right" style="margin-top:0; width:auto; padding:6px 10px;">&#9654;</button>
+          </div>
+        </div>
+        <div class="field">
+          <label><span>Shift column</span></label>
+          <div class="row2">
+            <input type="number" id="shiftColIdx" value="1" min="1" style="flex:1;">
+            <button class="action secondary" id="shiftColUpBtn" disabled title="Shift column up" style="margin-top:0; width:auto; padding:6px 10px;">&#9650;</button>
+            <button class="action secondary" id="shiftColDownBtn" disabled title="Shift column down" style="margin-top:0; width:auto; padding:6px 10px;">&#9660;</button>
+          </div>
+        </div>
+        <button class="action secondary" id="randomShiftRowsBtn" disabled>Randomize rows</button>
+        <button class="action secondary" id="randomShiftColsBtn" disabled>Randomize columns</button>
+        <button class="action secondary" id="shuffleBtn" disabled>Shuffle tiles</button>
+        <button class="action secondary" id="resetOrderBtn" disabled>Reset order</button>
+        <p class="hint">Drag a tile onto another to swap it, or shift a whole row/column cyclically above.</p>
+      </fieldset>
+      <fieldset id="freeActions" style="display:none;">
+        <legend>Layout</legend>
+        <button class="action secondary" id="scatterBtn" disabled>Scatter tiles</button>
+        <button class="action secondary" id="resetGridBtn" disabled>Reset to grid</button>
+        <p class="hint">Drag any tile on the board to reposition it. Tiles may overlap.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Export</legend>
+        <button class="action" id="downloadSnapBtn" disabled>Download PNG</button>
+        <button class="action secondary" id="downloadSnapZipBtn" disabled>Download tiles as ZIP</button>
+        <button class="action" id="downloadZipBtn" disabled style="display:none;">Download tiles as ZIP</button>
+        <button class="action secondary" id="downloadCompBtn" disabled style="display:none;">Download composition PNG</button>
+        <p class="stat-line" id="progressLabel"></p>
+      </fieldset>
+      <p class="stat-line" id="imgStat"></p>
+    </div>
+
+    <div id="boardWrap">
+      <div id="emptyState">No image loaded yet</div>
+      <div id="snapGrid"></div>
+      <div id="freeOuter"><div id="freeInner"></div></div>
+      <div id="gridOverlay"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+
+/* =========================================================================
+   Shared state
+   ========================================================================= */
+let img = null, naturalW = 0, naturalH = 0;
+let cols = 4, rows = 4, tileW = 0, tileH = 0, offsetX = 0, offsetY = 0, usedW = 0, usedH = 0;
+let tilesData = [];      // [{row,col,canvas}] in row-major order, sliced from source
+let mode = 'snap';       // 'snap' | 'free'
+
+// snap mode state
+let order = [];          // order[displaySlot] = index into tilesData
+let dragSrcEl = null;
+
+// free mode state
+let freeTiles = [];      // [{row,col,canvas,x,y,w,h,rot,z,el}] natural-image coords
+let freeScale = 1;
+let zCounter = 1;
+let ratioValue = 1;
+let tiltMode = 'none', tiltMax = 15;
+const MAX_DISPLAY_SNAP = 560;
+const MAX_DISPLAY_FREE = 620;
+
+const fileInput = $('fileInput');
+const drop = $('drop');
+const emptyState = $('emptyState');
+const snapGrid = $('snapGrid');
+const freeOuter = $('freeOuter');
+const freeInner = $('freeInner');
+const imgStat = $('imgStat');
+const progressLabel = $('progressLabel');
+
+const colsRange = $('colsRange'), colsOut = $('colsOut');
+const rowsField = $('rowsField'), rowsRange = $('rowsRange'), rowsOut = $('rowsOut');
+const ratioLock = $('ratioLock'), ratioOptions = $('ratioOptions');
+const ratioPreset = $('ratioPreset'), customRatioRow = $('customRatioRow');
+const ratioW = $('ratioW'), ratioH = $('ratioH');
+const gapField = $('gapField'), gapRange = $('gapRange'), gapOut = $('gapOut');
+const tiltFieldset = $('tiltFieldset'), tiltRange = $('tiltRange'), tiltOut = $('tiltOut');
+const gridOverlay = $('gridOverlay'), gridOverlayToggle = $('gridOverlayToggle');
+
+const shuffleBtn = $('shuffleBtn'), resetOrderBtn = $('resetOrderBtn');
+const scatterBtn = $('scatterBtn'), resetGridBtn = $('resetGridBtn');
+const downloadSnapBtn = $('downloadSnapBtn'), downloadZipBtn = $('downloadZipBtn'), downloadCompBtn = $('downloadCompBtn');
+const downloadSnapZipBtn = $('downloadSnapZipBtn');
+const shiftRowIdx = $('shiftRowIdx'), shiftColIdx = $('shiftColIdx');
+const shiftRowLeftBtn = $('shiftRowLeftBtn'), shiftRowRightBtn = $('shiftRowRightBtn');
+const shiftColUpBtn = $('shiftColUpBtn'), shiftColDownBtn = $('shiftColDownBtn');
+
+/* =========================================================================
+   Upload
+   ========================================================================= */
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('drag'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+drop.addEventListener('drop', e => {
+  e.preventDefault(); drop.classList.remove('drag');
+  if (e.dataTransfer.files && e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+
+function loadFile(file) {
+  if (!file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const image = new Image();
+    image.onload = () => {
+      img = image;
+      naturalW = image.naturalWidth;
+      naturalH = image.naturalHeight;
+      enableControls();
+      sliceAndRender();
+    };
+    image.src = ev.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function enableControls() {
+  [shuffleBtn, resetOrderBtn, scatterBtn, resetGridBtn, downloadSnapBtn, downloadSnapZipBtn, downloadZipBtn, downloadCompBtn,
+   shiftRowLeftBtn, shiftRowRightBtn, shiftColUpBtn, shiftColDownBtn, randomShiftRowsBtn, randomShiftColsBtn]
+    .forEach(b => b.disabled = false);
+}
+
+/* =========================================================================
+   Mode toggle
+   ========================================================================= */
+function setMode(m) {
+  mode = m;
+  $('modeSnapBtn').classList.toggle('active', m === 'snap');
+  $('modeFreeBtn').classList.toggle('active', m === 'free');
+  $('snapActions').style.display = m === 'snap' ? 'block' : 'none';
+  $('freeActions').style.display = m === 'free' ? 'block' : 'none';
+  tiltFieldset.style.display = m === 'free' ? 'block' : 'none';
+  gapField.style.display = m === 'free' ? 'block' : 'none';
+  downloadSnapBtn.style.display = m === 'snap' ? 'block' : 'none';
+  downloadSnapZipBtn.style.display = m === 'snap' ? 'block' : 'none';
+  downloadZipBtn.style.display = m === 'free' ? 'block' : 'none';
+  downloadCompBtn.style.display = m === 'free' ? 'block' : 'none';
+  snapGrid.style.display = (m === 'snap' && img) ? 'grid' : 'none';
+  freeOuter.style.display = (m === 'free' && img) ? 'block' : 'none';
+  if (img) { if (m === 'snap') renderSnap(); else renderFree(); }
+}
+$('modeSnapBtn').addEventListener('click', () => setMode('snap'));
+$('modeFreeBtn').addEventListener('click', () => setMode('free'));
+
+/* =========================================================================
+   Grid controls
+   ========================================================================= */
+colsRange.addEventListener('input', () => { colsOut.textContent = colsRange.value; if (img) sliceAndRender(); });
+rowsRange.addEventListener('input', () => { rowsOut.textContent = rowsRange.value; if (img) sliceAndRender(); });
+ratioLock.addEventListener('change', () => {
+  ratioOptions.style.display = ratioLock.checked ? 'block' : 'none';
+  rowsField.style.display = ratioLock.checked ? 'none' : 'block';
+  updateRatioValue();
+  if (img) sliceAndRender();
+});
+ratioPreset.addEventListener('change', () => {
+  customRatioRow.style.display = ratioPreset.value === 'custom' ? 'flex' : 'none';
+  updateRatioValue();
+  if (img) sliceAndRender();
+});
+ratioW.addEventListener('input', () => { updateRatioValue(); if (img) sliceAndRender(); });
+ratioH.addEventListener('input', () => { updateRatioValue(); if (img) sliceAndRender(); });
+function updateRatioValue() {
+  if (ratioPreset.value === 'custom') {
+    ratioValue = (parseFloat(ratioW.value) || 1) / (parseFloat(ratioH.value) || 1);
+  } else {
+    const [w, h] = ratioPreset.value.split('/').map(Number);
+    ratioValue = w / h;
+  }
+}
+updateRatioValue();
+
+gapRange.addEventListener('input', () => { gapOut.textContent = gapRange.value + 'px'; if (img) resetFreeToGrid(); });
+
+document.querySelectorAll('input[name="tiltMode"]').forEach(r => {
+  r.addEventListener('change', () => { tiltMode = r.value; if (img) applyTiltToAllFree(); });
+});
+tiltRange.addEventListener('input', () => { tiltOut.innerHTML = tiltRange.value + '&deg;'; tiltMax = parseInt(tiltRange.value, 10); if (img) applyTiltToAllFree(); });
+
+/* =========================================================================
+   Grid overlay (visual only — never affects any download)
+   ========================================================================= */
+gridOverlayToggle.addEventListener('change', updateGridOverlay);
+function updateGridOverlay() {
+  if (!gridOverlayToggle.checked || !img) { gridOverlay.style.display = 'none'; return; }
+  const target = mode === 'snap' ? snapGrid : freeOuter;
+  const w = target.offsetWidth, h = target.offsetHeight;
+  if (!w || !h) { gridOverlay.style.display = 'none'; return; }
+  gridOverlay.style.width = w + 'px';
+  gridOverlay.style.height = h + 'px';
+  gridOverlay.style.backgroundSize = (100 / cols) + '% ' + (100 / rows) + '%';
+  gridOverlay.style.display = 'block';
+}
+
+/* =========================================================================
+   Slicing (shared)
+   ========================================================================= */
+function sliceAndRender() {
+  cols = Math.max(1, Math.min(16, parseInt(colsRange.value, 10) || 4));
+
+  if (ratioLock.checked) {
+    tileW = naturalW / cols;
+    tileH = tileW / ratioValue;
+    rows = Math.max(1, Math.floor(naturalH / tileH));
+  } else {
+    rows = Math.max(1, Math.min(16, parseInt(rowsRange.value, 10) || 4));
+    tileW = naturalW / cols;
+    tileH = naturalH / rows;
+  }
+
+  usedW = tileW * cols; usedH = tileH * rows;
+  offsetX = (naturalW - usedW) / 2;
+  offsetY = (naturalH - usedH) / 2;
+
+  const srcCanvas = document.createElement('canvas');
+  srcCanvas.width = naturalW; srcCanvas.height = naturalH;
+  srcCanvas.getContext('2d').drawImage(img, 0, 0);
+
+  tilesData = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const sx = offsetX + c * tileW, sy = offsetY + r * tileH;
+      const cnv = document.createElement('canvas');
+      cnv.width = Math.max(1, Math.round(tileW));
+      cnv.height = Math.max(1, Math.round(tileH));
+      cnv.getContext('2d').drawImage(srcCanvas, sx, sy, tileW, tileH, 0, 0, cnv.width, cnv.height);
+      tilesData.push({ row: r, col: c, canvas: cnv });
+    }
+  }
+
+  order = tilesData.map((_, i) => i);
+  buildFreeFromGrid();
+
+  shiftRowIdx.max = rows; if (parseInt(shiftRowIdx.value, 10) > rows) shiftRowIdx.value = rows;
+  shiftColIdx.max = cols; if (parseInt(shiftColIdx.value, 10) > cols) shiftColIdx.value = cols;
+
+  emptyState.style.display = 'none';
+  imgStat.textContent = cols + '\u00d7' + rows + ' grid \u2014 ' + Math.round(tileW) + '\u00d7' + Math.round(tileH) + 'px tiles (source ' + naturalW + '\u00d7' + naturalH + 'px)';
+
+  if (mode === 'snap') { snapGrid.style.display = 'grid'; renderSnap(); }
+  else { freeOuter.style.display = 'block'; renderFree(); }
+}
+
+/* =========================================================================
+   SNAP GRID MODE  (ported from image-grid-shuffler.html)
+   ========================================================================= */
+shuffleBtn.addEventListener('click', () => {
+  if (!order.length) return;
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  renderSnap();
+});
+resetOrderBtn.addEventListener('click', () => { order = order.map((_, i) => i); renderSnap(); });
+
+function shiftRowBy(rowIdx, amount) {
+  if (!order.length || rowIdx < 0 || rowIdx >= rows) return;
+  const start = rowIdx * cols;
+  const vals = order.slice(start, start + cols);
+  const n = ((amount % cols) + cols) % cols;
+  const shifted = n === 0 ? vals : vals.slice(-n).concat(vals.slice(0, cols - n));
+  for (let i = 0; i < cols; i++) order[start + i] = shifted[i];
+}
+function shiftColumnBy(colIdx, amount) {
+  if (!order.length || colIdx < 0 || colIdx >= cols) return;
+  const vals = [];
+  for (let r = 0; r < rows; r++) vals.push(order[r * cols + colIdx]);
+  const n = ((amount % rows) + rows) % rows;
+  const shifted = n === 0 ? vals : vals.slice(-n).concat(vals.slice(0, rows - n));
+  for (let r = 0; r < rows; r++) order[r * cols + colIdx] = shifted[r];
+}
+function shiftRow(rowIdx, dir) { shiftRowBy(rowIdx, dir === 'right' ? 1 : -1); renderSnap(); }
+function shiftColumn(colIdx, dir) { shiftColumnBy(colIdx, dir === 'down' ? 1 : -1); renderSnap(); }
+shiftRowLeftBtn.addEventListener('click', () => shiftRow((parseInt(shiftRowIdx.value, 10) || 1) - 1, 'left'));
+shiftRowRightBtn.addEventListener('click', () => shiftRow((parseInt(shiftRowIdx.value, 10) || 1) - 1, 'right'));
+shiftColUpBtn.addEventListener('click', () => shiftColumn((parseInt(shiftColIdx.value, 10) || 1) - 1, 'up'));
+shiftColDownBtn.addEventListener('click', () => shiftColumn((parseInt(shiftColIdx.value, 10) || 1) - 1, 'down'));
+
+const randomShiftRowsBtn = $('randomShiftRowsBtn');
+randomShiftRowsBtn.addEventListener('click', () => {
+  if (!order.length) return;
+  for (let r = 0; r < rows; r++) shiftRowBy(r, Math.floor(Math.random() * cols));
+  renderSnap();
+});
+const randomShiftColsBtn = $('randomShiftColsBtn');
+randomShiftColsBtn.addEventListener('click', () => {
+  if (!order.length) return;
+  for (let c = 0; c < cols; c++) shiftColumnBy(c, Math.floor(Math.random() * rows));
+  renderSnap();
+});
+
+function renderSnap() {
+  if (!tilesData.length) return;
+  const scale = Math.min(1, MAX_DISPLAY_SNAP / usedW);
+  const dispW = usedW * scale, dispH = usedH * scale;
+  const dispTileW = dispW / cols, dispTileH = dispH / rows;
+
+  snapGrid.style.gridTemplateColumns = `repeat(${cols}, ${dispTileW}px)`;
+  snapGrid.style.gridTemplateRows = `repeat(${rows}, ${dispTileH}px)`;
+  snapGrid.style.width = dispW + 'px';
+  snapGrid.style.height = dispH + 'px';
+  snapGrid.innerHTML = '';
+
+  order.forEach((tileIdx, displayIdx) => {
+    const t = tilesData[tileIdx];
+    const tile = document.createElement('div');
+    tile.className = 'snap-tile';
+    tile.draggable = true;
+    tile.dataset.displayIdx = displayIdx;
+    tile.style.width = dispTileW + 'px';
+    tile.style.height = dispTileH + 'px';
+    tile.style.backgroundImage = `url(${t.canvas.toDataURL()})`;
+    tile.style.backgroundSize = `${dispTileW}px ${dispTileH}px`;
+
+    const num = document.createElement('span');
+    num.className = 'num';
+    num.textContent = tileIdx + 1;
+    tile.appendChild(num);
+
+    tile.addEventListener('dragstart', e => { dragSrcEl = tile; tile.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; });
+    tile.addEventListener('dragover', e => { e.preventDefault(); tile.classList.add('dragover'); });
+    tile.addEventListener('dragleave', () => tile.classList.remove('dragover'));
+    tile.addEventListener('drop', e => {
+      e.preventDefault();
+      tile.classList.remove('dragover');
+      if (!dragSrcEl || dragSrcEl === tile) return;
+      const a = parseInt(dragSrcEl.dataset.displayIdx), b = parseInt(tile.dataset.displayIdx);
+      [order[a], order[b]] = [order[b], order[a]];
+      renderSnap();
+    });
+    tile.addEventListener('dragend', () => tile.classList.remove('dragging'));
+
+    snapGrid.appendChild(tile);
+  });
+  updateGridOverlay();
+}
+
+downloadSnapBtn.addEventListener('click', () => {
+  if (!tilesData.length) return;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(tileW * cols);
+  canvas.height = Math.round(tileH * rows);
+  const ctx = canvas.getContext('2d');
+  order.forEach((tileIdx, displayIdx) => {
+    const t = tilesData[tileIdx];
+    const dstC = displayIdx % cols, dstR = Math.floor(displayIdx / cols);
+    ctx.drawImage(t.canvas, dstC * tileW, dstR * tileH, tileW, tileH);
+  });
+  canvas.toBlob(blob => {
+    const a = document.createElement('a');
+    a.download = 'grid-shuffled.png';
+    a.href = URL.createObjectURL(blob);
+    a.click();
+  });
+});
+
+downloadSnapZipBtn.addEventListener('click', () => {
+  if (!tilesData.length) return;
+  downloadSnapZipBtn.disabled = true;
+  progressLabel.textContent = 'Packaging tiles\u2026';
+  setTimeout(() => {
+    const zip = new JSZip();
+    const folder = zip.folder('tiles');
+    const manifest = [];
+    const total = order.length;
+    let done = 0;
+
+    function processNext(i) {
+      if (i >= total) { finishZip(); return; }
+      const tileIdx = order[i];
+      const t = tilesData[tileIdx];
+      const slotRow = Math.floor(i / cols), slotCol = i % cols;
+      const name = 'tile_r' + slotRow + '_c' + slotCol + '.png';
+      t.canvas.toBlob(blob => {
+        folder.file(name, blob);
+        manifest.push({ file: name, slotRow, slotCol, originalRow: t.row, originalCol: t.col });
+        done++;
+        progressLabel.textContent = 'Packaging tiles\u2026 ' + done + '/' + total;
+        processNext(i + 1);
+      }, 'image/png');
+    }
+    function finishZip() {
+      zip.file('layout.json', JSON.stringify({
+        cols, rows, tileWidth: Math.round(tileW), tileHeight: Math.round(tileH),
+        sourceWidth: naturalW, sourceHeight: naturalH, tiles: manifest
+      }, null, 2));
+      progressLabel.textContent = 'Compressing\u2026';
+      zip.generateAsync({ type: 'blob' }).then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'grid-tiles.zip';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+        progressLabel.textContent = 'Done \u2014 grid-tiles.zip downloaded';
+        downloadSnapZipBtn.disabled = false;
+      });
+    }
+    processNext(0);
+  }, 30);
+});
+
+/* =========================================================================
+   FREE DRAG MODE  (ported from tiler.html)
+   ========================================================================= */
+function buildFreeFromGrid() {
+  const gap = parseInt(gapRange.value, 10);
+  freeTiles = tilesData.map(t => {
+    const gx = offsetX + t.col * tileW + gap / 2;
+    const gy = offsetY + t.row * tileH + gap / 2;
+    const gw = Math.max(2, tileW - gap), gh = Math.max(2, tileH - gap);
+    return { row: t.row, col: t.col, canvas: t.canvas, x: gx, y: gy, w: gw, h: gh, rot: computeInitialRot(), z: ++zCounter, el: null };
+  });
+}
+function computeInitialRot() {
+  if (tiltMode === 'uniform') return tiltMax;
+  if (tiltMode === 'random') return (Math.random() * 2 - 1) * tiltMax;
+  return 0;
+}
+function applyTiltToAllFree() {
+  freeTiles.forEach(t => {
+    if (tiltMode === 'none') t.rot = 0;
+    else if (tiltMode === 'uniform') t.rot = tiltMax;
+    else t.rot = (Math.random() * 2 - 1) * tiltMax;
+    if (t.el) t.el.style.transform = 'rotate(' + t.rot + 'deg)';
+  });
+}
+function resetFreeToGrid() {
+  const gap = parseInt(gapRange.value, 10);
+  freeTiles.forEach(t => {
+    t.x = offsetX + t.col * tileW + gap / 2;
+    t.y = offsetY + t.row * tileH + gap / 2;
+    t.w = Math.max(2, tileW - gap);
+    t.h = Math.max(2, tileH - gap);
+    t.rot = computeInitialRot();
+  });
+  if (mode === 'free') renderFree(); else if (freeInner.children.length) positionAllFree();
+}
+resetGridBtn.addEventListener('click', () => { if (img) resetFreeToGrid(); });
+
+function renderFree() {
+  if (!freeTiles.length) return;
+  freeInner.innerHTML = '';
+  freeTiles.forEach(t => {
+    const div = document.createElement('div');
+    div.className = 'free-tile';
+    div.style.zIndex = t.z;
+    div.appendChild(cloneCanvas(t.canvas));
+    freeInner.appendChild(div);
+    t.el = div;
+    attachFreeDrag(t);
+  });
+  freeInner.style.width = naturalW + 'px';
+  freeInner.style.height = naturalH + 'px';
+  relayoutFree();
+  positionAllFree();
+}
+function cloneCanvas(src) {
+  const c = document.createElement('canvas');
+  c.width = src.width; c.height = src.height;
+  c.getContext('2d').drawImage(src, 0, 0);
+  return c;
+}
+function positionTile(t) {
+  t.el.style.left = t.x + 'px';
+  t.el.style.top = t.y + 'px';
+  t.el.style.width = t.w + 'px';
+  t.el.style.height = t.h + 'px';
+  t.el.style.transform = 'rotate(' + t.rot + 'deg)';
+}
+function positionAllFree() { freeTiles.forEach(t => { if (t.el) positionTile(t); }); }
+
+function relayoutFree() {
+  const containerW = freeOuter.parentElement ? freeOuter.parentElement.clientWidth : MAX_DISPLAY_FREE;
+  const availW = Math.min(containerW || MAX_DISPLAY_FREE, MAX_DISPLAY_FREE);
+  let scale = Math.min(availW / naturalW, 1);
+  if (naturalH * scale > 560) scale = 560 / naturalH;
+  freeScale = scale;
+  freeInner.style.transform = 'scale(' + scale + ')';
+  freeOuter.style.width = (naturalW * scale) + 'px';
+  freeOuter.style.height = (naturalH * scale) + 'px';
+  updateGridOverlay();
+}
+window.addEventListener('resize', () => { if (img && mode === 'free') relayoutFree(); });
+
+function attachFreeDrag(t) {
+  let dragging = false, startX, startY, origX, origY;
+  t.el.addEventListener('pointerdown', e => {
+    dragging = true;
+    t.el.setPointerCapture(e.pointerId);
+    t.z = ++zCounter;
+    t.el.style.zIndex = t.z;
+    startX = e.clientX; startY = e.clientY;
+    origX = t.x; origY = t.y;
+  });
+  t.el.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    t.x = origX + (e.clientX - startX) / freeScale;
+    t.y = origY + (e.clientY - startY) / freeScale;
+    positionTile(t);
+  });
+  const endDrag = () => { dragging = false; };
+  t.el.addEventListener('pointerup', endDrag);
+  t.el.addEventListener('pointercancel', endDrag);
+}
+
+scatterBtn.addEventListener('click', () => {
+  if (!freeTiles.length) return;
+  const maxX = naturalW * 0.9, maxY = naturalH * 0.9;
+  freeTiles.forEach(t => {
+    t.x = Math.random() * maxX - naturalW * 0.05;
+    t.y = Math.random() * maxY - naturalH * 0.05;
+    if (tiltMode === 'none') t.rot = (Math.random() * 2 - 1) * 12;
+    else if (tiltMode === 'uniform') t.rot = tiltMax;
+    else t.rot = (Math.random() * 2 - 1) * tiltMax;
+    t.z = ++zCounter;
+    if (t.el) t.el.style.zIndex = t.z;
+    if (t.el) positionTile(t);
+  });
+});
+
+function rotatedCorners(x, y, w, h, rotDeg) {
+  const rad = rotDeg * Math.PI / 180;
+  const cx = x + w / 2, cy = y + h / 2, hw = w / 2, hh = h / 2;
+  const pts = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]];
+  return pts.map(p => {
+    const rx = p[0] * Math.cos(rad) - p[1] * Math.sin(rad);
+    const ry = p[0] * Math.sin(rad) + p[1] * Math.cos(rad);
+    return { x: cx + rx, y: cy + ry };
+  });
+}
+function getCompositionBounds() {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  freeTiles.forEach(t => {
+    rotatedCorners(t.x, t.y, t.w, t.h, t.rot).forEach(p => {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    });
+  });
+  return { minX, minY, maxX, maxY };
+}
+
+downloadCompBtn.addEventListener('click', () => {
+  if (!freeTiles.length) return;
+  downloadCompBtn.disabled = true;
+  progressLabel.textContent = 'Flattening composition\u2026';
+  setTimeout(() => {
+    const b = getCompositionBounds();
+    const w = Math.max(1, Math.ceil(b.maxX - b.minX)), h = Math.max(1, Math.ceil(b.maxY - b.minY));
+    const out = document.createElement('canvas');
+    out.width = w; out.height = h;
+    const ctx = out.getContext('2d');
+    const ordered = freeTiles.slice().sort((a, c) => a.z - c.z);
+    ordered.forEach(t => {
+      const rad = t.rot * Math.PI / 180;
+      const cx = t.x + t.w / 2 - b.minX, cy = t.y + t.h / 2 - b.minY;
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(rad);
+      ctx.drawImage(t.canvas, -t.w / 2, -t.h / 2, t.w, t.h);
+      ctx.restore();
+    });
+    out.toBlob(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'composition.png';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      progressLabel.textContent = 'Done \u2014 composition.png downloaded';
+      downloadCompBtn.disabled = false;
+    }, 'image/png');
+  }, 30);
+});
+
+downloadZipBtn.addEventListener('click', () => {
+  if (!freeTiles.length) return;
+  downloadZipBtn.disabled = true;
+  progressLabel.textContent = 'Packaging tiles\u2026';
+  setTimeout(() => {
+    const zip = new JSZip();
+    const folder = zip.folder('tiles');
+    const manifest = [];
+    const total = freeTiles.length;
+    let done = 0;
+
+    function processNext(i) {
+      if (i >= total) { finishZip(); return; }
+      const t = freeTiles[i];
+      const rad = t.rot * Math.PI / 180;
+      const sw = t.canvas.width, sh = t.canvas.height;
+      const bw = Math.ceil(Math.abs(sw * Math.cos(rad)) + Math.abs(sh * Math.sin(rad)));
+      const bh = Math.ceil(Math.abs(sw * Math.sin(rad)) + Math.abs(sh * Math.cos(rad)));
+      const out = document.createElement('canvas');
+      out.width = Math.max(1, bw); out.height = Math.max(1, bh);
+      const octx = out.getContext('2d');
+      octx.translate(out.width / 2, out.height / 2);
+      octx.rotate(rad);
+      octx.drawImage(t.canvas, -sw / 2, -sh / 2);
+      const name = 'tile_r' + t.row + '_c' + t.col + '.png';
+      out.toBlob(blob => {
+        folder.file(name, blob);
+        manifest.push({ file: name, row: t.row, col: t.col, x: Math.round(t.x), y: Math.round(t.y), width: Math.round(t.w), height: Math.round(t.h), rotationDeg: Math.round(t.rot * 10) / 10 });
+        done++;
+        progressLabel.textContent = 'Packaging tiles\u2026 ' + done + '/' + total;
+        processNext(i + 1);
+      }, 'image/png');
+    }
+    function finishZip() {
+      zip.file('layout.json', JSON.stringify({ sourceWidth: naturalW, sourceHeight: naturalH, tileCount: total, tiles: manifest }, null, 2));
+      progressLabel.textContent = 'Compressing\u2026';
+      zip.generateAsync({ type: 'blob' }).then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'tiles.zip';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+        progressLabel.textContent = 'Done \u2014 tiles.zip downloaded';
+        downloadZipBtn.disabled = false;
+      });
+    }
+    processNext(0);
+  }, 30);
+});
+</script>
+</body>
+</html>

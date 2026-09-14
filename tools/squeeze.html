@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Squeeze — JPEG Compressor</title>
+<style>
+  :root {
+    --bg: #16161a;
+    --panel: #1f1f24;
+    --panel-2: #131316;
+    --border: #2e2e35;
+    --border-strong: #3d3d46;
+    --text: #f2f2f0;
+    --muted: #9a9aa2;
+    --accent: #e8e6df;
+    --accent-dim: #b9b7ae;
+    --success: #8fd19e;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 32px 20px 60px; }
+  .brand { margin-bottom: 20px; }
+  .brand .name { font-size: 1.2rem; font-weight: 700; }
+  .brand .tag { font-size: 0.85rem; color: var(--muted); margin-top: 2px; }
+
+  .drop-zone {
+    border: 1.5px dashed var(--border-strong);
+    border-radius: 12px;
+    padding: 34px 16px;
+    text-align: center;
+    cursor: pointer;
+    color: var(--muted);
+    transition: border-color .15s, color .15s, background .15s;
+  }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: var(--accent); color: var(--text); }
+  .drop-zone .hint { font-size: 0.78rem; color: var(--muted); margin-top: 4px; }
+  input[type=file] { display: none; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-top: 18px;
+  }
+  .controls-row { display: flex; gap: 28px; flex-wrap: wrap; }
+  .field { flex: 1; min-width: 200px; }
+  .field-label { display: flex; justify-content: space-between; font-size: 0.82rem; color: var(--muted); margin-bottom: 8px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+
+  /* single-file before/after preview */
+  .preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 18px; }
+  @media (max-width: 560px) { .preview-grid { grid-template-columns: 1fr; } }
+  .preview-col p.label { font-size: 0.8rem; color: var(--muted); margin: 0 0 8px; }
+  .preview-box {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 10px; display: flex; justify-content: center; align-items: center; min-height: 120px;
+  }
+  .preview-box canvas { max-width: 100%; height: auto; border-radius: 4px; }
+  .preview-size { font-size: 1rem; font-weight: 600; margin: 8px 0 0; }
+  .preview-dims { font-size: 0.76rem; color: var(--muted); margin: 2px 0 0; }
+
+  /* file list */
+  .list-head, .file-row {
+    display: grid;
+    grid-template-columns: minmax(0,1fr) 90px 20px 90px 64px 30px 30px;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 2px;
+    font-size: 0.82rem;
+  }
+  .list-head { color: var(--muted); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  .file-row { border-top: 1px solid var(--border); }
+  .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .size-old { color: var(--muted); text-align: right; }
+  .size-new { color: var(--text); font-weight: 500; text-align: right; }
+  .arrow { text-align: center; color: var(--muted); }
+  .pct {
+    color: var(--success); background: rgba(143,209,158,0.12);
+    border-radius: 6px; padding: 3px 6px; text-align: center; font-weight: 600; font-size: 0.76rem;
+  }
+  .icon-btn {
+    display: flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; border-radius: 6px; cursor: pointer;
+    color: var(--muted); background: none; border: none; font-size: 0.95rem; font-family: inherit;
+  }
+  .icon-btn:hover { background: var(--panel-2); color: var(--text); }
+  .icon-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .icon-btn.danger:hover { color: #e2734f; }
+
+  .btnrow { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+  button.primary, button.secondary {
+    border-radius: 8px; padding: 9px 16px; font-size: 0.86rem; font-weight: 600;
+    cursor: pointer; border: 1px solid transparent; font-family: inherit;
+  }
+  button.primary { background: var(--accent); color: #16161a; }
+  button.primary:hover:not(:disabled) { opacity: 0.88; }
+  button.primary:disabled { opacity: 0.35; cursor: not-allowed; }
+  button.secondary { background: var(--panel-2); border-color: var(--border-strong); color: var(--text); }
+  button.secondary:hover { border-color: var(--accent); }
+
+  .empty-note { color: var(--muted); font-size: 0.85rem; margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <div class="brand">
+    <div class="name">Squeeze</div>
+    <div class="tag">JPEG compressor — one file or a whole batch</div>
+  </div>
+
+  <div class="drop-zone" id="dropZone">
+    <div>Drop images here, or click to choose</div>
+    <div class="hint">Processed entirely in your browser — nothing is uploaded. Any image type in, compressed .jpg out.</div>
+  </div>
+  <input type="file" id="fileInput" accept="image/*" multiple>
+
+  <div class="card">
+    <div class="controls-row">
+      <div class="field">
+        <div class="field-label"><span>Quality</span><span id="qualityOut">75%</span></div>
+        <input type="range" id="quality" min="1" max="100" step="1" value="75">
+      </div>
+      <div class="field">
+        <div class="field-label"><span>Max width/height</span><span id="maxDimOut">no limit</span></div>
+        <input type="range" id="maxDim" min="0" max="4000" step="100" value="0">
+      </div>
+    </div>
+  </div>
+
+  <!-- shown only when exactly one file is loaded -->
+  <div class="card" id="singlePreviewCard" style="display:none;">
+    <div class="preview-grid">
+      <div class="preview-col">
+        <p class="label">Original</p>
+        <div class="preview-box"><canvas id="canvasOriginal"></canvas></div>
+        <p class="preview-size" id="originalSizeLabel">—</p>
+        <p class="preview-dims" id="originalDimsLabel"></p>
+      </div>
+      <div class="preview-col">
+        <p class="label">Compressed</p>
+        <div class="preview-box"><canvas id="canvasCompressed"></canvas></div>
+        <p class="preview-size" id="compressedSizeLabel">—</p>
+        <p class="preview-dims" id="compressedDimsLabel"></p>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="listCard" style="display:none;">
+    <div class="list-head">
+      <span>File</span><span style="text-align:right;">Original</span><span></span>
+      <span style="text-align:right;">New</span><span style="text-align:center;">Saved</span><span></span><span></span>
+    </div>
+    <div id="fileList"></div>
+    <div class="btnrow">
+      <button class="primary" id="downloadAllBtn">Download all as zip</button>
+      <button class="secondary" id="clearBtn">Clear</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const state = { files: [] };
+let idCounter = 0;
+let reprocessDebounce = null;
+const PREVIEW_MAX_DIM = 420;
+
+const fileInput = $('fileInput');
+const dropZone = $('dropZone');
+const listCard = $('listCard');
+const fileList = $('fileList');
+const qualitySlider = $('quality');
+const qualityOut = $('qualityOut');
+const maxDimSlider = $('maxDim');
+const maxDimOut = $('maxDimOut');
+const downloadAllBtn = $('downloadAllBtn');
+const clearBtn = $('clearBtn');
+const singlePreviewCard = $('singlePreviewCard');
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(bytes < 1024*100 ? 1 : 0) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+/* ---- upload ---- */
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  handleFiles(e.dataTransfer.files);
+});
+fileInput.addEventListener('change', e => { handleFiles(e.target.files); fileInput.value = ''; });
+
+function handleFiles(fileListRaw) {
+  const imgs = Array.from(fileListRaw).filter(f => f.type.startsWith('image/'));
+  imgs.forEach(file => {
+    const entry = {
+      id: idCounter++, file, originalSize: file.size, name: file.name,
+      status: 'processing', compressedBlob: null, compressedSize: null,
+      img: null, outW: 0, outH: 0
+    };
+    state.files.push(entry);
+    processFile(entry);
+  });
+  renderAll();
+}
+
+/* ---- controls ---- */
+qualitySlider.addEventListener('input', () => {
+  qualityOut.textContent = qualitySlider.value + '%';
+  clearTimeout(reprocessDebounce);
+  reprocessDebounce = setTimeout(reprocessAll, 80);
+});
+maxDimSlider.addEventListener('input', () => {
+  const v = Number(maxDimSlider.value);
+  maxDimOut.textContent = v === 0 ? 'no limit' : v + 'px';
+  clearTimeout(reprocessDebounce);
+  reprocessDebounce = setTimeout(reprocessAll, 80);
+});
+
+clearBtn.addEventListener('click', () => { state.files = []; renderAll(); });
+
+/* ---- processing ---- */
+function processFile(entry) {
+  entry.status = 'processing';
+  if (!entry.img) {
+    const img = new Image();
+    const url = URL.createObjectURL(entry.file);
+    img.onload = () => { URL.revokeObjectURL(url); entry.img = img; compress(entry); };
+    img.onerror = () => { entry.status = 'error'; renderAll(); };
+    img.src = url;
+  } else {
+    compress(entry);
+  }
+}
+
+function compress(entry) {
+  const img = entry.img;
+  const maxDim = Number(maxDimSlider.value);
+  let width = img.naturalWidth, height = img.naturalHeight;
+  if (maxDim > 0 && (width > maxDim || height > maxDim)) {
+    const scale = maxDim / Math.max(width, height);
+    width = Math.round(width * scale);
+    height = Math.round(height * scale);
+  }
+  entry.outW = width; entry.outH = height;
+  const canvas = document.createElement('canvas');
+  canvas.width = width; canvas.height = height;
+  canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+  const quality = Number(qualitySlider.value) / 100;
+  canvas.toBlob(blob => {
+    entry.compressedBlob = blob;
+    entry.compressedSize = blob.size;
+    entry.status = 'done';
+    renderAll();
+  }, 'image/jpeg', quality);
+}
+
+function reprocessAll() { state.files.forEach(processFile); renderAll(); }
+
+function removeFile(id) { state.files = state.files.filter(f => f.id !== id); renderAll(); }
+
+/* ---- downloads ---- */
+function jpgName(name) {
+  return /\.(jpe?g)$/i.test(name) ? name.replace(/\.(jpe?g)$/i, '-compressed.$1') : name.replace(/\.[^.]+$/, '') + '-compressed.jpg';
+}
+function downloadOne(entry) {
+  if (!entry.compressedBlob) return;
+  const url = URL.createObjectURL(entry.compressedBlob);
+  const a = document.createElement('a');
+  a.href = url; a.download = jpgName(entry.name);
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+async function downloadAllZip() {
+  const zip = new JSZip();
+  state.files.forEach(entry => { if (entry.compressedBlob) zip.file(jpgName(entry.name), entry.compressedBlob); });
+  const content = await zip.generateAsync({ type: 'blob' });
+  const url = URL.createObjectURL(content);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'compressed-jpgs.zip';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+downloadAllBtn.addEventListener('click', () => {
+  if (state.files.length === 1) downloadOne(state.files[0]);
+  else downloadAllZip();
+});
+
+/* ---- rendering ---- */
+function renderAll() {
+  const has = state.files.length > 0;
+  listCard.style.display = has ? 'block' : 'none';
+  downloadAllBtn.textContent = state.files.length === 1 ? 'Download .jpg' : 'Download all as zip';
+  renderList();
+  renderSinglePreview();
+}
+
+function renderList() {
+  fileList.innerHTML = '';
+  state.files.forEach(entry => {
+    const row = document.createElement('div');
+    row.className = 'file-row';
+    const savedPct = entry.compressedSize != null
+      ? Math.round((1 - entry.compressedSize / entry.originalSize) * 100)
+      : null;
+    const newSizeText = entry.status === 'processing' ? '…' : entry.status === 'error' ? 'error' : formatSize(entry.compressedSize);
+    const pctText = savedPct != null ? (savedPct >= 0 ? '-' + savedPct + '%' : '+' + (-savedPct) + '%') : '';
+
+    row.innerHTML = `
+      <span class="file-name" title="${entry.name}">${entry.name}</span>
+      <span class="size-old">${formatSize(entry.originalSize)}</span>
+      <span class="arrow">&#8594;</span>
+      <span class="size-new">${newSizeText}</span>
+      <span class="pct" style="${savedPct == null ? 'visibility:hidden;' : ''}">${pctText}</span>
+      <span></span>
+      <span></span>
+    `;
+    const cells = row.children;
+    const dlBtn = document.createElement('button');
+    dlBtn.className = 'icon-btn';
+    dlBtn.title = 'Download';
+    dlBtn.textContent = '\u2913';
+    dlBtn.disabled = entry.status !== 'done';
+    dlBtn.addEventListener('click', () => downloadOne(entry));
+    cells[5].appendChild(dlBtn);
+
+    const rmBtn = document.createElement('button');
+    rmBtn.className = 'icon-btn danger';
+    rmBtn.title = 'Remove';
+    rmBtn.textContent = '\u2715';
+    rmBtn.addEventListener('click', () => removeFile(entry.id));
+    cells[6].appendChild(rmBtn);
+
+    fileList.appendChild(row);
+  });
+}
+
+function renderSinglePreview() {
+  if (state.files.length !== 1) { singlePreviewCard.style.display = 'none'; return; }
+  const entry = state.files[0];
+  if (!entry.img) { singlePreviewCard.style.display = 'none'; return; }
+  singlePreviewCard.style.display = 'block';
+
+  const canvasOriginal = $('canvasOriginal');
+  const ctxOriginal = canvasOriginal.getContext('2d');
+  let pw = entry.img.naturalWidth, ph = entry.img.naturalHeight;
+  if (pw > PREVIEW_MAX_DIM || ph > PREVIEW_MAX_DIM) {
+    const s = PREVIEW_MAX_DIM / Math.max(pw, ph);
+    pw = Math.round(pw * s); ph = Math.round(ph * s);
+  }
+  canvasOriginal.width = pw; canvasOriginal.height = ph;
+  ctxOriginal.drawImage(entry.img, 0, 0, pw, ph);
+  $('originalSizeLabel').textContent = formatSize(entry.originalSize);
+  $('originalDimsLabel').textContent = entry.img.naturalWidth + ' x ' + entry.img.naturalHeight + ' px';
+
+  $('compressedSizeLabel').textContent = entry.status === 'done' ? formatSize(entry.compressedSize) : entry.status === 'error' ? 'error' : 'compressing\u2026';
+  $('compressedDimsLabel').textContent = entry.outW && entry.outH ? entry.outW + ' x ' + entry.outH + ' px' : '';
+
+  const canvasCompressed = $('canvasCompressed');
+  const ctxCompressed = canvasCompressed.getContext('2d');
+  if (entry.status === 'done' && entry.compressedBlob) {
+    const img2 = new Image();
+    img2.onload = () => {
+      let dw = entry.outW, dh = entry.outH;
+      if (dw > PREVIEW_MAX_DIM || dh > PREVIEW_MAX_DIM) {
+        const s = PREVIEW_MAX_DIM / Math.max(dw, dh);
+        dw = Math.round(dw * s); dh = Math.round(dh * s);
+      }
+      canvasCompressed.width = dw; canvasCompressed.height = dh;
+      ctxCompressed.clearRect(0, 0, dw, dh);
+      ctxCompressed.drawImage(img2, 0, 0, dw, dh);
+    };
+    img2.src = URL.createObjectURL(entry.compressedBlob);
+  } else {
+    canvasCompressed.width = pw; canvasCompressed.height = ph;
+    ctxCompressed.clearRect(0, 0, pw, ph);
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,1654 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>GIF Combiner</title>
+<script>
+/*!
+ * gif-decoder.js — shared GIF89a/87a decoder
+ *
+ * Replaces the hand-rolled parseGIF/lzwDecode pairs duplicated across
+ * frame-grabber, gif-compressor, gif-editor, gif-shape-cutter, and
+ * gif-splicer, plus the two third-party libs (omggif, gifuct-js) used
+ * by gifsmith and gif-grid-studio. One decoder, one set of bugs to fix.
+ *
+ * Usage:
+ *   const gif = GifDecoder.parseGIF(arrayBuffer);
+ *   // gif.width, gif.height, gif.loopCount
+ *   // gif.frames[i].delay        -> ms
+ *   // gif.frames[i].disposal     -> 0..3 (raw GIF disposal method)
+ *   // gif.frames[i].patch        -> {x,y,width,height,rgba:Uint8ClampedArray} (this frame's own pixels only)
+ *   // gif.frames[i].composited   -> Uint8ClampedArray, full gif.width*gif.height RGBA,
+ *   //                                already composited per the disposal method chain
+ *
+ * If a tool only needs finished frames to draw/re-encode (the common case),
+ * use `composited`. If a tool wants to do its own compositing (e.g. an
+ * editor that needs to know exactly which pixels changed), use `patch`.
+ *
+ * No dependencies. Works as a plain <script> (exposes window.GifDecoder)
+ * or via CommonJS/ESM interop (module.exports).
+ */
+(function (root, factory) {
+  const mod = factory();
+  if (typeof module === 'object' && module.exports) {
+    module.exports = mod;
+  } else {
+    root.GifDecoder = mod;
+  }
+})(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
+
+  // ---- disposal method constants (GIF spec, Graphic Control Extension) ----
+  const DISPOSAL_NONE = 0;        // treat as "do not dispose" (1) if unspecified
+  const DISPOSAL_DO_NOT_DISPOSE = 1;
+  const DISPOSAL_RESTORE_BACKGROUND = 2;
+  const DISPOSAL_RESTORE_PREVIOUS = 3;
+
+  /**
+   * Minimal byte-array reader with bounds checking. Every duplicated
+   * parser in the old tools read past the end of `data` silently on
+   * truncated/corrupt GIFs (returning 0s forever, sometimes looping).
+   * This one throws instead, so a bad file fails loudly rather than
+   * hanging the tab.
+   */
+  class ByteReader {
+    constructor(buf) {
+      this.data = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+      this.pos = 0;
+    }
+    eof() { return this.pos >= this.data.length; }
+    u8() {
+      if (this.pos >= this.data.length) throw new GifParseError('Unexpected end of file');
+      return this.data[this.pos++];
+    }
+    u16() {
+      const lo = this.u8(), hi = this.u8();
+      return lo | (hi << 8);
+    }
+    bytes(n) {
+      if (this.pos + n > this.data.length) throw new GifParseError('Unexpected end of file');
+      const out = this.data.subarray(this.pos, this.pos + n);
+      this.pos += n;
+      return out;
+    }
+    skip(n) {
+      if (this.pos + n > this.data.length) throw new GifParseError('Unexpected end of file');
+      this.pos += n;
+    }
+  }
+
+  class GifParseError extends Error {
+    constructor(msg) { super(msg); this.name = 'GifParseError'; }
+  }
+
+  /** Reads the length-prefixed "data sub-block" chain used for both
+   *  image data and extension blocks, concatenating into one buffer. */
+  function readSubBlocks(r) {
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const len = r.u8();
+      if (len === 0) break;
+      const chunk = r.bytes(len);
+      chunks.push(chunk);
+      total += len;
+    }
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { out.set(c, off); off += c.length; }
+    return out;
+  }
+
+  /**
+   * Variable-width LZW decoder per the GIF spec (based on TIFF LZW with
+   * the GIF-specific early code-size bump). `minCodeSize` comes from the
+   * image data block; `pixelCount` is width*height of the sub-image, used
+   * to pre-size the output and as a stopping condition (some encoders
+   * omit an explicit EOI code).
+   */
+  function lzwDecode(minCodeSize, data, pixelCount) {
+    const clearCode = 1 << minCodeSize;
+    const eoiCode = clearCode + 1;
+    const output = new Uint8Array(pixelCount);
+    let outPos = 0;
+
+    let dict, codeSize, nextCode;
+    function resetDict() {
+      dict = new Array(4096);
+      for (let i = 0; i < clearCode; i++) dict[i] = [i];
+      dict[clearCode] = null;
+      dict[eoiCode] = null;
+      codeSize = minCodeSize + 1;
+      nextCode = eoiCode + 1;
+    }
+    resetDict();
+
+    let bitBuffer = 0, bitsInBuffer = 0, bytePos = 0;
+    function readCode() {
+      while (bitsInBuffer < codeSize) {
+        const byte = bytePos < data.length ? data[bytePos] : 0;
+        bytePos++;
+        bitBuffer |= byte << bitsInBuffer;
+        bitsInBuffer += 8;
+      }
+      const code = bitBuffer & ((1 << codeSize) - 1);
+      bitBuffer >>= codeSize;
+      bitsInBuffer -= codeSize;
+      return code;
+    }
+
+    let prev = null;
+    while (outPos < pixelCount) {
+      if (bytePos > data.length + 4) break; // safety valve on malformed streams
+      const code = readCode();
+      if (code === clearCode) { resetDict(); prev = null; continue; }
+      if (code === eoiCode) break;
+
+      let entry;
+      if (dict[code]) {
+        entry = dict[code];
+      } else if (code === nextCode && prev) {
+        entry = prev.concat([prev[0]]);
+      } else {
+        break; // invalid code — bail rather than corrupt further output
+      }
+
+      for (let i = 0; i < entry.length && outPos < pixelCount; i++) output[outPos++] = entry[i];
+
+      if (prev && nextCode < 4096) {
+        dict[nextCode] = prev.concat([entry[0]]);
+        nextCode++;
+        if (nextCode === (1 << codeSize) && codeSize < 12) codeSize++;
+      }
+      prev = entry;
+    }
+    return output;
+  }
+
+  /** De-interlaces a GIF image (4-pass Adam7-style row order used by GIF,
+   *  not to be confused with PNG's Adam7). `rows` is an array of `width`-
+   *  length rows in the file's storage order; returns rows in display order. */
+  function deinterlace(rows, height) {
+    const out = new Array(height);
+    const passes = [
+      { start: 0, step: 8 },
+      { start: 4, step: 8 },
+      { start: 2, step: 4 },
+      { start: 1, step: 2 },
+    ];
+    let srcRow = 0;
+    for (const p of passes) {
+      for (let y = p.start; y < height; y += p.step) {
+        out[y] = rows[srcRow++];
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Parses a GIF file into logical-screen metadata plus a list of frames.
+   * @param {ArrayBuffer|Uint8Array} buffer
+   * @returns {{width:number, height:number, loopCount:number, frames:Array}}
+   */
+  function parseGIF(buffer) {
+    const r = new ByteReader(buffer);
+
+    const sig = String.fromCharCode(r.u8(), r.u8(), r.u8());
+    const ver = String.fromCharCode(r.u8(), r.u8(), r.u8());
+    if (sig !== 'GIF' || (ver !== '87a' && ver !== '89a')) {
+      throw new GifParseError('Not a GIF file (bad signature)');
+    }
+
+    const width = r.u16();
+    const height = r.u16();
+    const packed = r.u8();
+    const gctFlag = (packed & 0x80) !== 0;
+    const gctSize = 2 << (packed & 0x07);
+    r.u8(); // background color index (unused — we composite against transparent)
+    r.u8(); // pixel aspect ratio (unused)
+
+    let globalColorTable = null;
+    if (gctFlag) globalColorTable = readColorTable(r, gctSize);
+
+    const frames = [];
+    let loopCount = 0; // 0 = infinite (Netscape convention) unless overridden
+    let hasLoopExt = false;
+
+    // Pending graphic control state, applies to the *next* image block.
+    let pendingDelay = 100;      // ms, default matches common browser fallback
+    let pendingDisposal = DISPOSAL_NONE;
+    let pendingTransparentIndex = -1;
+    let pendingHasTransparency = false;
+
+    for (;;) {
+      if (r.eof()) break;
+      const blockType = r.u8();
+
+      if (blockType === 0x3b) break; // trailer
+
+      if (blockType === 0x21) { // extension
+        const label = r.u8();
+        if (label === 0xf9) { // graphic control extension
+          const blockSize = r.u8(); // should be 4
+          const gcePacked = r.u8();
+          pendingDisposal = (gcePacked >> 2) & 0x07;
+          pendingHasTransparency = (gcePacked & 0x01) !== 0;
+          const delayCs = r.u16(); // centiseconds
+          pendingTransparentIndex = r.u8();
+          if (!pendingHasTransparency) pendingTransparentIndex = -1;
+          // Many encoders write 0 or 1 here meaning "as fast as possible";
+          // browsers clamp this to a visible minimum, so we do too.
+          pendingDelay = delayCs <= 1 ? 100 : delayCs * 10;
+          if (blockSize > 4) r.skip(blockSize - 4);
+          const terminator = r.u8();
+          if (terminator !== 0) throw new GifParseError('Malformed graphic control extension');
+        } else if (label === 0xff) { // application extension (e.g. NETSCAPE2.0 loop count)
+          const blockSize = r.u8();
+          const appId = r.bytes(blockSize);
+          const isNetscape = appId.length >= 11 &&
+            String.fromCharCode.apply(null, appId.subarray(0, 11)) === 'NETSCAPE2.0';
+          const sub = readSubBlocks(r);
+          if (isNetscape && sub.length >= 3 && sub[0] === 1) {
+            loopCount = sub[1] | (sub[2] << 8);
+            hasLoopExt = true;
+          }
+        } else {
+          // comment (0xfe), plain text (0x01), or anything unrecognized — skip its body
+          readSubBlocks(r);
+        }
+        continue;
+      }
+
+      if (blockType === 0x2c) { // image descriptor
+        const left = r.u16();
+        const top = r.u16();
+        const imgWidth = r.u16();
+        const imgHeight = r.u16();
+        const imgPacked = r.u8();
+        const lctFlag = (imgPacked & 0x80) !== 0;
+        const interlaced = (imgPacked & 0x40) !== 0;
+        const lctSize = 2 << (imgPacked & 0x07);
+
+        let colorTable = globalColorTable;
+        if (lctFlag) colorTable = readColorTable(r, lctSize);
+        if (!colorTable) throw new GifParseError('Frame has no color table (local or global)');
+
+        const minCodeSize = r.u8();
+        const imgData = readSubBlocks(r);
+        const indices = lzwDecode(minCodeSize, imgData, imgWidth * imgHeight);
+
+        let rows = [];
+        for (let y = 0; y < imgHeight; y++) rows.push(indices.subarray(y * imgWidth, (y + 1) * imgWidth));
+        if (interlaced) rows = deinterlace(rows, imgHeight);
+
+        const rgba = new Uint8ClampedArray(imgWidth * imgHeight * 4);
+        for (let y = 0; y < imgHeight; y++) {
+          const row = rows[y];
+          for (let x = 0; x < imgWidth; x++) {
+            const idx = row[x];
+            const o = (y * imgWidth + x) * 4;
+            if (idx === pendingTransparentIndex) {
+              rgba[o] = 0; rgba[o + 1] = 0; rgba[o + 2] = 0; rgba[o + 3] = 0;
+            } else {
+              const c = idx * 3;
+              rgba[o] = colorTable[c];
+              rgba[o + 1] = colorTable[c + 1];
+              rgba[o + 2] = colorTable[c + 2];
+              rgba[o + 3] = 255;
+            }
+          }
+        }
+
+        frames.push({
+          delay: pendingDelay,
+          disposal: pendingDisposal,
+          patch: { x: left, y: top, width: imgWidth, height: imgHeight, rgba },
+        });
+
+        // Reset per-frame graphic-control state to spec defaults for next iteration.
+        pendingDelay = 100;
+        pendingDisposal = DISPOSAL_NONE;
+        pendingTransparentIndex = -1;
+        pendingHasTransparency = false;
+        continue;
+      }
+
+      throw new GifParseError('Unknown block type 0x' + blockType.toString(16));
+    }
+
+    compositeFrames(frames, width, height);
+
+    return {
+      width,
+      height,
+      loopCount: hasLoopExt ? loopCount : 0,
+      frames,
+    };
+  }
+
+  function readColorTable(r, size) {
+    const table = new Uint8Array(size * 3);
+    for (let i = 0; i < size * 3; i++) table[i] = r.u8();
+    return table;
+  }
+
+  /**
+   * Fills in `frame.composited` for every frame — a full-canvas RGBA
+   * buffer, honoring each frame's disposal method against the ones
+   * before it. This is the part every one of the old tools either
+   * skipped (frame-grabber only drew the raw patch) or half-implemented
+   * inline, which is why several of them showed ghosting/tearing on
+   * GIFs that relied on "restore to background" or "restore to previous".
+   */
+  function compositeFrames(frames, width, height) {
+    let canvas = new Uint8ClampedArray(width * height * 4); // starts transparent
+    let savedForRestore = null; // snapshot for DISPOSAL_RESTORE_PREVIOUS
+    let pendingDisposal = null; // disposal method of the *previous* frame
+    let pendingRect = null;     // that frame's patch rect
+
+    for (const frame of frames) {
+      // Disposal from the *previous* frame is applied before drawing this one.
+      if (pendingDisposal === DISPOSAL_RESTORE_BACKGROUND && pendingRect) {
+        clearRect(canvas, width, pendingRect);
+      } else if (pendingDisposal === DISPOSAL_RESTORE_PREVIOUS && savedForRestore) {
+        canvas.set(savedForRestore);
+      }
+
+      // If this frame needs "restore to previous" after itself, snapshot now,
+      // before drawing it, so the snapshot reflects the state beneath it.
+      if (frame.disposal === DISPOSAL_RESTORE_PREVIOUS) {
+        savedForRestore = canvas.slice();
+      }
+
+      drawPatch(canvas, width, frame.patch);
+      frame.composited = canvas.slice();
+
+      pendingDisposal = frame.disposal;
+      pendingRect = frame.patch;
+    }
+  }
+
+  function drawPatch(canvas, canvasWidth, patch) {
+    for (let y = 0; y < patch.height; y++) {
+      const destRow = patch.y + y;
+      for (let x = 0; x < patch.width; x++) {
+        const destCol = patch.x + x;
+        const srcO = (y * patch.width + x) * 4;
+        if (patch.rgba[srcO + 3] === 0) continue; // transparent pixel — leave canvas as-is
+        const destO = (destRow * canvasWidth + destCol) * 4;
+        canvas[destO] = patch.rgba[srcO];
+        canvas[destO + 1] = patch.rgba[srcO + 1];
+        canvas[destO + 2] = patch.rgba[srcO + 2];
+        canvas[destO + 3] = 255;
+      }
+    }
+  }
+
+  function clearRect(canvas, canvasWidth, rect) {
+    for (let y = 0; y < rect.height; y++) {
+      const row = rect.y + y;
+      const start = (row * canvasWidth + rect.x) * 4;
+      canvas.fill(0, start, start + rect.width * 4);
+    }
+  }
+
+  return { parseGIF, lzwDecode, GifParseError };
+});
+
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.js"></script>
+<style>
+  :root{
+    --bg-app:#171310; --panel:#221c15; --panel-2:#2c2419;
+    --stroke:#3d3325; --stroke-soft:#2f2819;
+    --cream:#f3ead6; --text:#e9e1d1; --muted:#9c9184;
+    --accent:#e2a53a; --accent-2:#4ea79a; --danger:#c25a3d;
+    --radius:10px;
+    font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;}
+  body{ background:var(--bg-app); color:var(--text); }
+  ::selection{ background:var(--accent); color:#171310; }
+
+  .app{ display:flex; flex-direction:column; height:100vh; }
+
+  .topbar{
+    display:flex; align-items:center; gap:16px;
+    padding:12px 22px; background:var(--panel); border-bottom:1px solid var(--stroke);
+    flex-shrink:0;
+  }
+  .topbar h1{ font-size:16px; margin:0; color:var(--cream); font-weight:700; letter-spacing:-0.01em; }
+  .mode-toggle{ display:flex; border:1px solid var(--stroke); border-radius:8px; overflow:hidden; }
+  .mode-toggle button{
+    background:var(--panel-2); border:0; color:var(--muted); font-size:13px; font-weight:600;
+    padding:8px 16px; cursor:pointer;
+  }
+  .mode-toggle button.active{ background:var(--accent); color:#1a1409; }
+  .topbar .status{ flex:1; font-size:12.5px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .topbar .status.error{ color:var(--danger); }
+  .export-btn{
+    background:var(--accent); color:#1a1409; border:0; border-radius:8px;
+    font-weight:700; font-size:13.5px; padding:9px 18px; cursor:pointer;
+  }
+  .export-btn:disabled{ background:var(--stroke); color:var(--muted); cursor:not-allowed; }
+
+  .body{ flex:1; display:flex; min-height:0; }
+  .sidebar{
+    width:340px; flex-shrink:0; background:var(--panel); border-right:1px solid var(--stroke);
+    overflow-y:auto; padding:16px 16px 60px;
+  }
+  .panel{ background:var(--panel-2); border:1px solid var(--stroke-soft); border-radius:var(--radius); padding:14px; margin-bottom:14px; }
+  .panel h2{ font-family:inherit; font-size:11.5px; font-weight:700; letter-spacing:.04em; color:var(--muted); margin:0 0 10px; text-transform:uppercase; }
+  .hint{ font-size:11.5px; color:var(--muted); line-height:1.5; margin:6px 0 0; }
+
+  .dropzone{
+    border:1.5px dashed var(--stroke); border-radius:var(--radius); padding:20px 12px; text-align:center;
+    cursor:pointer; transition:border-color .15s, background .15s;
+  }
+  .dropzone:hover, .dropzone.drag{ border-color:var(--accent); background:#2f2717; }
+  .dropzone .icon{ font-size:22px; color:var(--accent); }
+  .dropzone .main{ font-weight:600; font-size:13.5px; margin-top:4px; }
+  .dropzone .sub{ color:var(--muted); font-size:11.5px; margin-top:2px; }
+  input[type=file]{ display:none; }
+
+  .field-row{ display:flex; gap:8px; margin-bottom:10px; }
+  .field{ flex:1; display:flex; flex-direction:column; gap:4px; }
+  .field label{ font-size:11px; color:var(--muted); }
+  .field input[type=number], .field input[type=color], .field select, select.block{
+    background:var(--panel); border:1px solid var(--stroke); color:var(--text);
+    border-radius:7px; padding:7px 8px; font-size:13px; width:100%; font-family:inherit;
+  }
+  .field input[type=range]{ accent-color:var(--accent); width:100%; }
+  .field-label{ display:flex; justify-content:space-between; font-size:11px; color:var(--muted); margin-bottom:4px; }
+  .field-label b{ color:var(--text); font-family:ui-monospace,monospace; font-weight:600; }
+  .checkbox-row{ display:flex; align-items:center; gap:7px; font-size:12px; color:var(--text); margin-top:6px; }
+  .checkbox-row input{ accent-color:var(--accent); }
+
+  .toggle-row{ display:flex; border:1px solid var(--stroke); border-radius:7px; overflow:hidden; }
+  .toggle-row button{ flex:1; background:var(--panel); border:0; color:var(--muted); font-size:12px; padding:7px 0; cursor:pointer; }
+  .toggle-row button.active{ background:var(--accent); color:#1a1409; font-weight:600; }
+
+  .preset-row{ display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
+  .preset-btn{ background:var(--panel); border:1px solid var(--stroke); color:var(--muted); font-size:11px; padding:6px 10px; border-radius:20px; cursor:pointer; }
+  .preset-btn:hover{ color:var(--text); border-color:var(--accent-2); }
+
+  .stat-line{ display:flex; justify-content:space-between; font-size:12px; color:var(--muted); padding:5px 0; border-top:1px solid var(--stroke-soft); }
+  .stat-line b{ color:var(--text); }
+
+  /* ---- shared source thumb list ---- */
+  .src-list{ display:flex; flex-direction:column; gap:8px; margin-top:10px; }
+  .src-empty{ font-size:12px; color:var(--muted); text-align:center; padding:10px 0; }
+
+  /* ---- Sequence mode: clip cards ---- */
+  .clip{ background:var(--panel); border:1px solid var(--stroke-soft); border-radius:10px; overflow:hidden; }
+  .clip-body{ display:grid; grid-template-columns:28px 120px 1fr; gap:12px; padding:12px; align-items:start; }
+  .clip-num{ font-weight:700; font-size:16px; color:var(--accent); line-height:1.4; }
+  .clip-thumb-col{ display:flex; flex-direction:column; gap:6px; }
+  .crop-canvas{ width:120px; height:78px; border-radius:6px; border:1px solid var(--stroke); cursor:grab; touch-action:none; display:block; }
+  .crop-canvas:active{ cursor:grabbing; }
+  .fit-toggle{ display:flex; border:1px solid var(--stroke); border-radius:6px; overflow:hidden; width:120px; }
+  .fit-toggle button{ flex:1; background:transparent; border:0; color:var(--muted); font-size:10.5px; padding:5px 0; cursor:pointer; }
+  .fit-toggle button.active{ background:var(--accent); color:#171310; font-weight:600; }
+  .clip-info{ display:flex; flex-direction:column; gap:8px; min-width:0; }
+  .clip-title-row{ display:flex; justify-content:space-between; gap:8px; align-items:flex-start; }
+  .clip-name{ font-weight:600; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .clip-meta{ color:var(--muted); font-size:11px; margin-top:2px; }
+  .clip-actions{ display:flex; gap:5px; flex:none; }
+  .icon-btn{ background:transparent; border:1px solid var(--stroke); color:var(--muted); width:24px; height:24px; border-radius:6px; cursor:pointer; font-size:12px; display:flex; align-items:center; justify-content:center; }
+  .icon-btn:hover{ border-color:var(--muted); color:var(--text); }
+  .icon-btn.danger:hover{ border-color:var(--danger); color:var(--danger); }
+  .icon-btn:disabled{ opacity:.3; cursor:not-allowed; }
+  .trim-row{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .trim-row label{ font-size:11px; color:var(--muted); display:flex; align-items:center; gap:5px; }
+  .trim-row input[type=number]{ width:52px; background:var(--panel); border:1px solid var(--stroke); color:var(--text); border-radius:6px; padding:4px 5px; font-size:12px; }
+  .trim-count{ font-size:11px; color:var(--accent-2); font-weight:600; }
+
+  /* ---- Grid mode: board ---- */
+  .stage-wrap{ flex:1; display:flex; flex-direction:column; align-items:center; padding:26px 20px 40px; overflow:auto; background:#dedad0; }
+  .stage-header{ width:100%; max-width:900px; display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; color:#4c4d46; }
+  .stage-header h2{ font-size:14px; margin:0; font-weight:600; }
+  .stage-header .mono{ font-family:ui-monospace,monospace; font-size:12px; color:#6c6d64; }
+  .arrange-btn{ background:transparent; color:#4c4d46; border:1px solid #b6b2a4; border-radius:7px; padding:8px 12px; font-size:12px; cursor:pointer; }
+  .board{ position:relative; background:#fff; box-shadow:0 12px 34px rgba(0,0,0,.28), 0 2px 6px rgba(0,0,0,.12); flex-shrink:0; }
+  .board.checker{
+    background-image:
+      linear-gradient(45deg,#ccc 25%,transparent 25%), linear-gradient(-45deg,#ccc 25%,transparent 25%),
+      linear-gradient(45deg,transparent 75%,#ccc 75%), linear-gradient(-45deg,transparent 75%,#ccc 75%);
+    background-size:16px 16px; background-position:0 0,0 8px,8px -8px,-8px 0;
+  }
+  .margin-guide{ position:absolute; border:1px dashed #c9cbe8; pointer-events:none; }
+  .img-box{ position:absolute; box-sizing:border-box; cursor:grab; touch-action:none; overflow:hidden; }
+  .img-box.dragging{ cursor:grabbing; z-index:20; }
+  .img-box.selected{ outline:2px solid #3550e8; box-shadow:0 0 0 3px #3550e833; }
+  .img-box img{ width:100%; height:100%; object-fit:contain; display:block; pointer-events:none; user-select:none; }
+  .img-remove{ position:absolute; top:-9px; right:-9px; width:19px; height:19px; border-radius:50%; background:#1c1d1f; color:#fff; border:2px solid #fff; align-items:center; justify-content:center; cursor:pointer; font-size:10px; display:none; }
+  .empty-board{ width:100%; max-width:900px; min-height:300px; border:2px dashed #b6b2a4; border-radius:14px; display:flex; flex-direction:column; align-items:center; justify-content:center; color:#7c7b73; gap:8px; text-align:center; padding:26px; }
+  .empty-board button{ background:#1c1d1f; color:#fff; border:0; border-radius:7px; padding:9px 16px; font-size:13px; cursor:pointer; margin-top:4px; }
+  .warning-banner{ margin-top:10px; font-size:12px; color:#9a5b00; background:#fdf0d5; border:1px solid #edd39c; padding:7px 10px; border-radius:6px; max-width:900px; width:100%; display:none; }
+  .warning-banner.show{ display:block; }
+  .layout-options{ display:flex; flex-direction:column; gap:6px; }
+  .layout-btn{ display:flex; align-items:flex-start; gap:9px; text-align:left; width:100%; background:var(--panel); border:1px solid var(--stroke); border-radius:8px; padding:9px 10px; cursor:pointer; color:var(--text); }
+  .layout-btn.active{ border-color:var(--accent); background:#3a3020; }
+  .layout-btn-title{ font-size:12.5px; font-weight:600; }
+  .layout-btn-desc{ font-size:11px; color:var(--muted); margin-top:2px; line-height:1.3; }
+
+  /* ---- export modal (shared) ---- */
+  .modal{ position:fixed; inset:0; background:rgba(10,8,5,.6); display:none; align-items:center; justify-content:center; z-index:60; }
+  .modal.show{ display:flex; }
+  .modal-card{ background:var(--panel); border:1px solid var(--stroke); border-radius:14px; padding:24px 26px; width:340px; text-align:center; }
+  .modal-card h3{ margin:0 0 6px; font-size:15px; color:var(--cream); }
+  .modal-card p{ margin:0 0 14px; font-size:12.5px; color:var(--muted); }
+  .progress-track{ height:8px; background:var(--panel-2); border:1px solid var(--stroke); border-radius:5px; overflow:hidden; margin-bottom:14px; }
+  .progress-fill{ height:100%; width:0%; background:var(--accent-2); transition:width .12s linear; }
+  .result-preview img{ max-width:100%; border-radius:8px; border:1px solid var(--stroke); margin-bottom:12px; background:#000; }
+  .btn{ font-family:inherit; font-size:12.5px; font-weight:600; padding:9px 12px; border-radius:7px; border:1px solid var(--stroke); background:var(--panel-2); color:var(--text); cursor:pointer; }
+  .btn.block{ width:100%; }
+  .download-btn{ display:block; background:var(--accent-2); color:#0f1e1c; padding:10px; border-radius:8px; font-weight:600; text-decoration:none; margin-bottom:8px; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="topbar">
+    <h1>GIF Combiner</h1>
+    <div class="mode-toggle">
+      <button id="modeSeqBtn" class="active">Sequence</button>
+      <button id="modeGridBtn">Grid</button>
+    </div>
+    <div class="status" id="statusText">Add two or more GIFs or images to combine them.</div>
+    <button class="export-btn" id="exportBtn" disabled>Export GIF</button>
+  </div>
+
+  <div class="body">
+    <div class="sidebar">
+
+      <div class="panel">
+        <h2>Sources</h2>
+        <div class="dropzone" id="dropzone">
+          <div class="icon">＋</div>
+          <div class="main">Add GIFs or images</div>
+          <div class="sub">Click to browse, or drop files here</div>
+        </div>
+        <input type="file" id="fileInput" accept="image/*" multiple>
+        <div class="src-list" id="seqClipList"></div>
+        <div class="src-empty" id="srcEmptyNote">No sources yet — add at least two.</div>
+      </div>
+
+      <!-- SEQUENCE-MODE PANEL -->
+      <div id="seqOutputPanel" class="panel">
+        <h2>Output</h2>
+        <p class="hint" style="margin-bottom:10px;">Every source is cropped or padded to this size before splicing, so the result is uniform start to finish.</p>
+        <div class="field-row">
+          <div class="field"><label>Width (px)</label><input type="number" id="outW" min="2" max="1600" value="480"></div>
+          <div class="field"><label>Height (px)</label><input type="number" id="outH" min="2" max="1600" value="320"></div>
+        </div>
+        <div class="preset-row">
+          <button class="preset-btn" id="presetSmallest">Match smallest</button>
+          <button class="preset-btn" id="presetLargest">Match largest</button>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Pad color (used in "Fit" mode)</label><input type="color" id="bgColor" value="#000000"></div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Default image duration</label>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <input type="number" id="imgDuration" min="0.1" max="10" step="0.1" value="0.5">
+              <span style="font-size:12px;color:var(--muted);">sec</span>
+            </div>
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Quality</label>
+            <select id="seqQuality">
+              <option value="20">Fast</option>
+              <option value="10" selected>Balanced</option>
+              <option value="1">High quality</option>
+            </select>
+          </div>
+          <div class="field"><label>Looping</label>
+            <select id="seqLoop">
+              <option value="0" selected>Loop forever</option>
+              <option value="1">Play once</option>
+            </select>
+          </div>
+        </div>
+        <div class="stat-line"><span>Sources</span><b id="statClips">0</b></div>
+        <div class="stat-line"><span>Total frames</span><b id="statFrames">0</b></div>
+        <div class="stat-line"><span>Approx. duration</span><b id="statDuration">0.0s</b></div>
+      </div>
+
+      <!-- GRID-MODE PANELS -->
+      <div id="gridPanels" style="display:none;">
+        <div class="panel">
+          <h2>Canvas size</h2>
+          <select id="presetSelect" class="block" style="margin-bottom:8px;"></select>
+          <div class="field-row" id="customSizeRow" style="display:none;">
+            <div class="field"><input type="number" id="customW" min="16" placeholder="width"></div>
+            <div class="field"><input type="number" id="customH" min="16" placeholder="height"></div>
+          </div>
+          <div class="toggle-row" id="orientationGroup">
+            <button id="btnPortrait" class="active">Portrait</button>
+            <button id="btnLandscape">Landscape</button>
+          </div>
+          <p class="hint" id="canvasSizeReadout"></p>
+        </div>
+
+        <div class="panel">
+          <h2>Margins &amp; spacing</h2>
+          <div class="checkbox-row" style="margin-bottom:6px;">
+            <input type="checkbox" id="linkMargins" checked><label for="linkMargins">Same on all sides</label>
+          </div>
+          <input class="block" id="marginLinked" type="number" min="0" style="margin-bottom:8px;">
+          <div class="field-row" id="marginGrid" style="display:none;">
+            <input type="number" id="marginTop" placeholder="top">
+            <input type="number" id="marginRight" placeholder="right">
+          </div>
+          <div class="field-row" id="marginGrid2" style="display:none;">
+            <input type="number" id="marginBottom" placeholder="bottom">
+            <input type="number" id="marginLeft" placeholder="left">
+          </div>
+          <div class="field" style="margin-top:8px;">
+            <div class="field-label"><span>Spacing</span><b id="spacingReadout"></b></div>
+            <input type="range" id="spacingSlider" min="0" max="80" step="1">
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Layout</h2>
+          <div class="field" style="margin-bottom:10px;">
+            <div class="field-label"><span>Image size (all)</span><b id="globalScaleReadout">100%</b></div>
+            <input type="range" id="globalScaleSlider" min="0.4" max="1.6" step="0.05">
+          </div>
+          <div class="layout-options" id="layoutOptions"></div>
+        </div>
+
+        <div class="panel" id="gridSelectedPanel" style="display:none;">
+          <h2>Selected image</h2>
+          <div class="field-label"><span>Size</span><b id="selectedScaleReadout">100%</b></div>
+          <input type="range" id="selectedScaleSlider" min="0.4" max="2.2" step="0.05">
+        </div>
+
+        <div class="panel">
+          <h2>Animation</h2>
+          <div class="field" style="margin-bottom:10px;">
+            <div class="field-label"><span>Output frame rate</span><b id="fpsReadout">10 fps</b></div>
+            <input type="range" id="fpsSlider" min="4" max="20" step="1">
+          </div>
+          <div class="field">
+            <div class="field-label"><span>Max export length</span><b id="maxDurReadout">5.0s</b></div>
+            <input type="range" id="maxDurSlider" min="1" max="15" step="0.5">
+          </div>
+          <p class="hint">Runs until the longest looping GIF completes once, capped at this length.</p>
+          <div class="checkbox-row">
+            <input type="checkbox" id="transparentBg"><label for="transparentBg">Transparent background</label>
+          </div>
+          <p class="hint">GIF transparency is all-or-nothing per pixel, so soft edges may show a faint fringe.</p>
+        </div>
+
+        <div class="panel">
+          <div class="checkbox-row"><input type="checkbox" id="showGuides" checked><label for="showGuides">Show margin guide</label></div>
+          <div class="checkbox-row"><input type="checkbox" id="lockArrangement"><label for="lockArrangement">Lock arrangement</label></div>
+          <p class="hint">When locked, adding or removing images won't reshuffle the rest.</p>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- SEQUENCE MODE has no dedicated stage; clip cards live in the sidebar list above. -->
+    <div class="stage-wrap" id="gridStageWrap" style="display:none;">
+      <div class="stage-header">
+        <h2>Canvas preview <span class="mono" id="headerSizeReadout"></span></h2>
+        <button class="arrange-btn" id="arrangeBtn">Re-arrange</button>
+      </div>
+      <div class="warning-banner" id="overflowWarning">Content runs past the bottom margin — reduce image size, spacing, or the number of images, or switch to Even grid.</div>
+      <div class="empty-board" id="emptyBoard">
+        <div style="font-size:26px;">🖼️</div>
+        <p style="margin:0;">Drop GIFs or images here, or use the panel on the left</p>
+        <button id="emptyBoardBtn">Choose files</button>
+      </div>
+      <div class="board" id="board" style="display:none;">
+        <div class="margin-guide" id="marginGuideEl"></div>
+      </div>
+    </div>
+
+    <div class="stage-wrap" id="seqStageWrap">
+      <div style="max-width:640px; text-align:center; color:var(--muted); margin-top:60px;" id="seqStageEmpty">
+        <div style="font-size:30px;">🎬</div>
+        <p>Add sources on the left, then reorder, trim, and crop each one. The clip cards on the left are your editing surface — export when you're happy with the sequence.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="exportModal">
+  <div class="modal-card">
+    <div id="progressView">
+      <h3>Rendering your GIF</h3>
+      <p id="progressText">Preparing…</p>
+      <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+      <button class="btn block" id="cancelBtn">Cancel</button>
+    </div>
+    <div id="resultView" style="display:none;">
+      <h3>Your GIF is ready</h3>
+      <p id="resultMeta"></p>
+      <div class="result-preview"><img id="resultImg" alt="Combined GIF result"></div>
+      <a class="download-btn" id="downloadLink" download="combined.gif">Download</a>
+      <button class="btn block" id="closeModalBtn">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* =========================================================
+     LAYOUT ALGORITHMS (from gif-grid-studio, unchanged — pure
+     geometry, independent of how frames are decoded)
+  ========================================================= */
+  function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+
+  function gridLayout(items, availW, availH, spacing, scale, fillVertical){
+    const n = items.length;
+    if(n === 0) return [];
+    availW = Math.max(availW,10); availH = Math.max(availH,10);
+    let cols = clamp(Math.round(Math.sqrt((n*availW)/availH)), 1, n);
+    let rows = Math.ceil(n/cols);
+    const cellW = (availW-(cols-1)*spacing)/cols;
+    const cellH = (availH-(rows-1)*spacing)/rows;
+    let vGap = spacing;
+    if(fillVertical && rows>1) vGap = (availH-rows*cellH)/(rows-1);
+    const out=[];
+    for(let i=0;i<n;i++){
+      const row=Math.floor(i/cols), col=i%cols;
+      const rowCount=Math.min(cols, n-row*cols);
+      const rowWidth=rowCount*cellW+(rowCount-1)*spacing;
+      const rowStartX=(availW-rowWidth)/2;
+      const cellX=rowStartX+col*(cellW+spacing);
+      const cellY=row*(cellH+vGap);
+      const targetW=cellW*scale, targetH=cellH*scale;
+      const r=items[i].r;
+      let w,h;
+      if(targetW/targetH>r){ h=targetH; w=h*r; } else { w=targetW; h=w/r; }
+      out.push({id:items[i].id, x:cellX+(cellW-w)/2, y:cellY+(cellH-h)/2, w, h});
+    }
+    return out;
+  }
+  function flowLayout(items, availW, availH, spacing, scale){
+    const n=items.length;
+    if(n===0) return [];
+    availW=Math.max(availW,10); availH=Math.max(availH,10);
+    const avgR=items.reduce((s,it)=>s+it.r,0)/n;
+    const approxRows=clamp(Math.round(Math.sqrt((n*avgR*availH)/availW)),1,n);
+    const targetH=Math.max(16, ((availH-(approxRows-1)*spacing)/approxRows)*scale);
+    const out=[]; let x=0,y=0,rowH=0;
+    items.forEach(it=>{
+      const w=targetH*it.r;
+      if(x>0 && x+w>availW){ x=0; y+=rowH+spacing; rowH=0; }
+      out.push({id:it.id,x,y,w,h:targetH});
+      x+=w+spacing; rowH=Math.max(rowH,targetH);
+    });
+    return out;
+  }
+  function justifiedLayout(items, availW, availH, spacing, scale){
+    const n=items.length;
+    if(n===0) return [];
+    availW=Math.max(availW,10); availH=Math.max(availH,10);
+    const avgR=items.reduce((s,it)=>s+it.r,0)/n;
+    const approxRows=clamp(Math.round(Math.sqrt((n*avgR*availH)/availW)),1,n);
+    const baseTargetH=Math.max(16, ((availH-(approxRows-1)*spacing)/approxRows)*scale);
+    const rows=[]; let current=[], curW=0;
+    items.forEach(it=>{
+      const w=baseTargetH*it.r;
+      if(current.length>0 && curW+w>availW){ rows.push(current); current=[]; curW=0; }
+      current.push(it); curW+=w+spacing;
+    });
+    if(current.length) rows.push(current);
+    const out=[]; let y=0;
+    rows.forEach(row=>{
+      const sumR=row.reduce((s,it)=>s+it.r,0);
+      let h=(availW-(row.length-1)*spacing)/sumR;
+      h=Math.min(h, baseTargetH*1.6);
+      let x=0;
+      row.forEach(it=>{ const w=h*it.r; out.push({id:it.id,x,y,w,h}); x+=w+spacing; });
+      y+=h+spacing;
+    });
+    return out;
+  }
+  function computeLayout(images, mode, boardW, boardH, marginsPx, spacingPx, scale){
+    const availW = boardW-marginsPx.left-marginsPx.right;
+    const availH = boardH-marginsPx.top-marginsPx.bottom;
+    const meta = images.map(im => ({ id: im.id, r: im.natW/im.natH }));
+    let base;
+    if(mode==="grid") base=gridLayout(meta,availW,availH,spacingPx,scale,false);
+    else if(mode==="fill") base=gridLayout(meta,availW,availH,spacingPx,scale,true);
+    else if(mode==="sequential") base=flowLayout(meta,availW,availH,spacingPx,scale);
+    else base=justifiedLayout(meta,availW,availH,spacingPx,scale);
+    return base.map(b => ({ ...b, x:b.x+marginsPx.left, y:b.y+marginsPx.top }));
+  }
+
+  const LAYOUT_MODES = [
+    { key:"grid", label:"Even grid", desc:"Images spaced evenly across the whole canvas" },
+    { key:"sequential", label:"Sequential", desc:"Left to right, top to bottom, natural sizes" },
+    { key:"justified", label:"Justified rows", desc:"Even gaps between images, rows flush edge to edge" },
+    { key:"fill", label:"Fill margins", desc:"First row meets the top margin, last row meets the bottom" }
+  ];
+  const PRESETS = [
+    { key:"sq480", label:"480 × 480 px", w:480, h:480 },
+    { key:"640x480", label:"640 × 480 px", w:640, h:480 },
+    { key:"800x600", label:"800 × 600 px", w:800, h:600 },
+    { key:"sq300", label:"300 × 300 px", w:300, h:300 },
+    { key:"custom", label:"Custom", w:null, h:null }
+  ];
+  const PREVIEW_MAX_W = 640, PREVIEW_MAX_H = 560;
+
+  /* =========================================================
+     SEQUENCE-MODE COMPOSITING (from gif-splicer, unchanged)
+  ========================================================= */
+  function computeCoverGeometry(sw, sh, ow, oh, offsetX, offsetY){
+    const scale = Math.max(ow/sw, oh/sh);
+    const drawW = sw*scale, drawH = sh*scale;
+    const excessX = drawW-ow, excessY = drawH-oh;
+    const dx = -excessX*offsetX, dy = -excessY*offsetY;
+    return { drawW, drawH, dx, dy, scale };
+  }
+  function renderFrameToOutput(sctx, frameCanvas, src, ow, oh, bg){
+    sctx.clearRect(0,0,ow,oh);
+    if(src.seqFit === "contain"){
+      sctx.fillStyle = bg;
+      sctx.fillRect(0,0,ow,oh);
+      const scale = Math.min(ow/src.natW, oh/src.natH);
+      const dw = src.natW*scale, dh = src.natH*scale;
+      const dx = (ow-dw)/2, dy = (oh-dh)/2;
+      sctx.drawImage(frameCanvas, dx, dy, dw, dh);
+    } else {
+      const geo = computeCoverGeometry(src.natW, src.natH, ow, oh, src.seqOffsetX, src.seqOffsetY);
+      sctx.drawImage(frameCanvas, geo.dx, geo.dy, geo.drawW, geo.drawH);
+    }
+  }
+
+  /* =========================================================
+     SHARED SOURCE MODEL
+     Every uploaded file (GIF or plain image) becomes one of
+     these, usable from either mode without re-uploading.
+  ========================================================= */
+  let sources = []; // in array order (= sequence order)
+  let srcCounter = 0;
+
+  function decodeSourceFile(file){
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const buffer = reader.result;
+        const isGif = file.type === "image/gif" || /\.gif$/i.test(file.name);
+        try{
+          if(isGif){
+            const gif = GifDecoder.parseGIF(buffer);
+            const frames = gif.frames.map(f => {
+              const c = document.createElement("canvas");
+              c.width = gif.width; c.height = gif.height;
+              c.getContext("2d").putImageData(new ImageData(f.composited, gif.width, gif.height), 0, 0);
+              return { canvas: c, delay: f.delay };
+            });
+            resolve(makeSource(file, "gif", gif.width, gif.height, frames));
+          } else {
+            const blob = new Blob([buffer], { type: file.type || "image/png" });
+            const url = URL.createObjectURL(blob);
+            const img = new Image();
+            img.onload = () => {
+              const c = document.createElement("canvas");
+              c.width = img.naturalWidth; c.height = img.naturalHeight;
+              c.getContext("2d").drawImage(img, 0, 0);
+              resolve(makeSource(file, "image", img.naturalWidth, img.naturalHeight, [{ canvas: c, delay: null }], url));
+            };
+            img.onerror = () => reject(new Error("Could not decode image"));
+            img.src = url;
+          }
+        } catch(err){ reject(err); }
+      };
+      reader.onerror = () => reject(new Error("Could not read file"));
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  function makeSource(file, kind, natW, natH, frames, previewUrl){
+    const loopDuration = kind === "gif" ? frames.reduce((s,f) => s+f.delay, 0) || 100 : 100;
+    return {
+      id: "s" + (srcCounter++),
+      name: file.name, kind, natW, natH, frames, loopDuration,
+      previewUrl: previewUrl || frames[0].canvas.toDataURL(),
+      // sequence fields
+      seqStart: 1, seqEnd: frames.length, seqFit: "cover", seqOffsetX: 0.5, seqOffsetY: 0.5, seqDuration: null,
+      // grid fields (position assigned by layout on add)
+      gridX: 0, gridY: 0, gridW: 100, gridH: 100, gridBaseW: 100, gridBaseH: 100, gridScale: 1
+    };
+  }
+
+  function addFiles(fileList){
+    const files = Array.from(fileList).filter(f => f.type.startsWith("image/"));
+    if(!files.length) return;
+    setStatus("Reading " + files.length + " file" + (files.length===1?"":"s") + "\u2026");
+    Promise.allSettled(files.map(decodeSourceFile)).then(results => {
+      let added = 0, failed = 0;
+      results.forEach(r => {
+        if(r.status === "fulfilled"){
+          const src = r.value;
+          placeNewGridImage(src);
+          sources.push(src);
+          added++;
+        } else failed++;
+      });
+      if(added) { renderSeqList(); renderGridBoard(true); updateExportEnabled(); }
+      setStatus(added + " source" + (added===1?"":"s") + " added" + (failed ? ", " + failed + " failed" : "") + ".", failed && !added);
+    });
+  }
+
+  function removeSource(id){
+    sources = sources.filter(s => s.id !== id);
+    if(selectedGridId === id) selectGridImage(null);
+    renderSeqList();
+    renderGridBoard();
+    updateExportEnabled();
+  }
+  function moveSource(id, dir){
+    const i = sources.findIndex(s => s.id === id);
+    const j = i+dir;
+    if(j<0 || j>=sources.length) return;
+    [sources[i], sources[j]] = [sources[j], sources[i]];
+    renderSeqList();
+  }
+
+  function updateExportEnabled(){
+    el.exportBtn.disabled = sources.length < 2;
+  }
+
+  function setStatus(msg, isError){
+    el.statusText.textContent = msg;
+    el.statusText.classList.toggle("error", !!isError);
+  }
+
+  /* =========================================================
+     DOM refs + upload wiring (shared)
+  ========================================================= */
+  const el = {};
+  ["statusText","exportBtn","modeSeqBtn","modeGridBtn","dropzone","fileInput",
+   "seqClipList","srcEmptyNote","seqOutputPanel","gridPanels","seqStageWrap","seqStageEmpty",
+   "outW","outH","presetSmallest","presetLargest","bgColor","imgDuration","seqQuality","seqLoop",
+   "statClips","statFrames","statDuration",
+   "gridStageWrap","presetSelect","customSizeRow","customW","customH","btnPortrait","btnLandscape",
+   "canvasSizeReadout","linkMargins","marginLinked","marginGrid","marginGrid2",
+   "marginTop","marginRight","marginBottom","marginLeft","spacingSlider","spacingReadout",
+   "globalScaleSlider","globalScaleReadout","layoutOptions","gridSelectedPanel",
+   "selectedScaleSlider","selectedScaleReadout","fpsSlider","fpsReadout","maxDurSlider","maxDurReadout",
+   "transparentBg","showGuides","lockArrangement","headerSizeReadout","arrangeBtn",
+   "overflowWarning","emptyBoard","emptyBoardBtn","board","marginGuideEl",
+   "exportModal","progressView","resultView","progressText","progressFill","cancelBtn",
+   "resultMeta","resultImg","downloadLink","closeModalBtn"
+  ].forEach(id => { el[id] = document.getElementById(id); });
+
+  el.dropzone.addEventListener("click", () => el.fileInput.click());
+  el.emptyBoardBtn.addEventListener("click", () => el.fileInput.click());
+  el.fileInput.addEventListener("change", e => { addFiles(e.target.files); e.target.value = ""; });
+  [el.dropzone, el.board].forEach(zone => {
+    zone.addEventListener("dragover", e => { e.preventDefault(); zone.classList.add("drag","over"); });
+    zone.addEventListener("dragleave", () => zone.classList.remove("drag","over"));
+    zone.addEventListener("drop", e => {
+      e.preventDefault(); zone.classList.remove("drag","over");
+      if(e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+    });
+  });
+
+  /* =========================================================
+     MODE SWITCHING
+  ========================================================= */
+  let mode = "sequence";
+  function setMode(next){
+    mode = next;
+    el.modeSeqBtn.classList.toggle("active", mode==="sequence");
+    el.modeGridBtn.classList.toggle("active", mode==="grid");
+    el.seqOutputPanel.style.display = mode==="sequence" ? "block" : "none";
+    el.gridPanels.style.display = mode==="grid" ? "block" : "none";
+    el.seqStageWrap.style.display = mode==="sequence" ? "flex" : "none";
+    el.gridStageWrap.style.display = mode==="grid" ? "flex" : "none";
+    if(mode==="grid") { updatePosterFrame(); renderGridBoard(); }
+  }
+  el.modeSeqBtn.addEventListener("click", () => setMode("sequence"));
+  el.modeGridBtn.addEventListener("click", () => setMode("grid"));
+
+  /* =========================================================
+     SEQUENCE MODE UI
+  ========================================================= */
+  function clampTrim(src){
+    src.seqStart = Math.min(Math.max(1, src.seqStart||1), src.frames.length);
+    src.seqEnd = Math.min(Math.max(src.seqStart, src.seqEnd||src.frames.length), src.frames.length);
+  }
+
+  function renderSeqList(){
+    el.seqClipList.innerHTML = "";
+    el.srcEmptyNote.style.display = sources.length ? "none" : "block";
+    sources.forEach((src, index) => {
+      if(src.kind === "gif") clampTrim(src);
+      const card = document.createElement("div");
+      card.className = "clip";
+
+      const body = document.createElement("div");
+      body.className = "clip-body";
+
+      const num = document.createElement("div");
+      num.className = "clip-num";
+      num.textContent = String(index+1).padStart(2,"0");
+
+      const thumbCol = document.createElement("div");
+      thumbCol.className = "clip-thumb-col";
+      const cropCanvas = document.createElement("canvas");
+      cropCanvas.className = "crop-canvas";
+      cropCanvas.width = 240; cropCanvas.height = 156;
+      thumbCol.appendChild(cropCanvas);
+
+      const fitToggle = document.createElement("div");
+      fitToggle.className = "fit-toggle";
+      const coverBtn = document.createElement("button"); coverBtn.textContent = "Fill";
+      const containBtn = document.createElement("button"); containBtn.textContent = "Fit";
+      coverBtn.className = src.seqFit==="cover" ? "active" : "";
+      containBtn.className = src.seqFit==="contain" ? "active" : "";
+      coverBtn.onclick = () => { src.seqFit = "cover"; renderSeqList(); };
+      containBtn.onclick = () => { src.seqFit = "contain"; renderSeqList(); };
+      fitToggle.append(coverBtn, containBtn);
+      thumbCol.appendChild(fitToggle);
+
+      const info = document.createElement("div");
+      info.className = "clip-info";
+
+      const titleRow = document.createElement("div");
+      titleRow.className = "clip-title-row";
+      const nameBlock = document.createElement("div");
+      const nameEl = document.createElement("div"); nameEl.className = "clip-name"; nameEl.textContent = src.name;
+      const metaEl = document.createElement("div"); metaEl.className = "clip-meta";
+      metaEl.textContent = src.natW+"\u00d7"+src.natH+" \u00b7 "+(src.kind==="gif" ? src.frames.length+" frames" : "static image");
+      nameBlock.append(nameEl, metaEl);
+
+      const actions = document.createElement("div");
+      actions.className = "clip-actions";
+      const upBtn = mkIconBtn("\u2191", () => moveSource(src.id,-1));
+      const downBtn = mkIconBtn("\u2193", () => moveSource(src.id,1));
+      const delBtn = mkIconBtn("\u2715", () => removeSource(src.id), true);
+      if(index===0) upBtn.disabled = true;
+      if(index===sources.length-1) downBtn.disabled = true;
+      actions.append(upBtn, downBtn, delBtn);
+      titleRow.append(nameBlock, actions);
+
+      const trimRow = document.createElement("div");
+      trimRow.className = "trim-row";
+      if(src.kind === "gif"){
+        const startLabel = document.createElement("label"); startLabel.textContent = "Start";
+        const startInput = document.createElement("input");
+        startInput.type = "number"; startInput.min = 1; startInput.max = src.frames.length; startInput.value = src.seqStart;
+        startInput.oninput = () => { src.seqStart = parseInt(startInput.value||"1",10); clampTrim(src); updateSeqStats(); trimCountEl.textContent = (src.seqEnd-src.seqStart+1)+" frames used"; };
+        startLabel.appendChild(startInput);
+        const endLabel = document.createElement("label"); endLabel.textContent = "End";
+        const endInput = document.createElement("input");
+        endInput.type = "number"; endInput.min = 1; endInput.max = src.frames.length; endInput.value = src.seqEnd;
+        endInput.oninput = () => { src.seqEnd = parseInt(endInput.value||String(src.frames.length),10); clampTrim(src); updateSeqStats(); trimCountEl.textContent = (src.seqEnd-src.seqStart+1)+" frames used"; };
+        endLabel.appendChild(endInput);
+        var trimCountEl = document.createElement("span");
+        trimCountEl.className = "trim-count";
+        trimCountEl.textContent = (src.seqEnd-src.seqStart+1)+" frames used";
+        trimRow.append(startLabel, endLabel, trimCountEl);
+      } else {
+        const durLabel = document.createElement("label"); durLabel.textContent = "Duration";
+        const durInput = document.createElement("input");
+        durInput.type = "number"; durInput.min = 0.1; durInput.step = 0.1;
+        durInput.value = src.seqDuration != null ? (src.seqDuration/1000) : parseFloat(el.imgDuration.value)||0.5;
+        durInput.title = "Seconds this image is shown for";
+        durInput.oninput = () => { src.seqDuration = Math.max(50, Math.round(parseFloat(durInput.value||"0.5")*1000)); updateSeqStats(); };
+        durLabel.appendChild(durInput);
+        const s = document.createElement("span"); s.style.cssText = "font-size:11px;color:var(--muted);"; s.textContent = "sec (override)";
+        trimRow.append(durLabel, s);
+      }
+
+      info.append(titleRow, trimRow);
+      body.append(num, thumbCol, info);
+      card.appendChild(body);
+      el.seqClipList.appendChild(card);
+
+      setupCropCanvas(cropCanvas, src);
+    });
+    updateSeqStats();
+  }
+
+  function mkIconBtn(label, onClick, danger){
+    const b = document.createElement("button");
+    b.className = "icon-btn"+(danger?" danger":"");
+    b.textContent = label;
+    b.onclick = onClick;
+    return b;
+  }
+
+  function setupCropCanvas(canvas, src){
+    const ctx = canvas.getContext("2d");
+    function draw(){
+      const boxW = canvas.width, boxH = canvas.height;
+      ctx.fillStyle = "#100d09"; ctx.fillRect(0,0,boxW,boxH);
+      const sw = src.natW, sh = src.natH;
+      const scaleShow = Math.min(boxW/sw, boxH/sh);
+      const shownW = sw*scaleShow, shownH = sh*scaleShow;
+      const shownX = (boxW-shownW)/2, shownY = (boxH-shownH)/2;
+      const frameImg = src.frames[0].canvas;
+      ctx.drawImage(frameImg, shownX, shownY, shownW, shownH);
+
+      if(src.seqFit === "contain"){
+        const ow = Math.max(2, parseInt(el.outW.value||"1",10));
+        const oh = Math.max(2, parseInt(el.outH.value||"1",10));
+        const targetScaleInShow = Math.min(shownW/ow, shownH/oh);
+        const rw = ow*targetScaleInShow, rh = oh*targetScaleInShow;
+        const rx = shownX+(shownW-rw)/2, ry = shownY+(shownH-rh)/2;
+        ctx.strokeStyle = "rgba(226,165,58,0.9)"; ctx.setLineDash([6,5]); ctx.lineWidth=2;
+        ctx.strokeRect(rx+1, ry+1, rw-2, rh-2); ctx.setLineDash([]);
+        return;
+      }
+      const ow = Math.max(2, parseInt(el.outW.value||"1",10));
+      const oh = Math.max(2, parseInt(el.outH.value||"1",10));
+      const geo = computeCoverGeometry(sw, sh, ow, oh, src.seqOffsetX, src.seqOffsetY);
+      const rectX = shownX + (-geo.dx/geo.scale)*scaleShow;
+      const rectY = shownY + (-geo.dy/geo.scale)*scaleShow;
+      const rectW = (ow/geo.scale)*scaleShow;
+      const rectH = (oh/geo.scale)*scaleShow;
+      ctx.fillStyle = "rgba(10,8,5,0.55)"; ctx.fillRect(shownX,shownY,shownW,shownH);
+      ctx.save(); ctx.beginPath(); ctx.rect(rectX,rectY,rectW,rectH); ctx.clip();
+      ctx.drawImage(frameImg, shownX, shownY, shownW, shownH);
+      ctx.restore();
+      ctx.strokeStyle = "#e2a53a"; ctx.lineWidth = 2;
+      ctx.strokeRect(rectX+1, rectY+1, rectW-2, rectH-2);
+    }
+    src._redrawPreview = draw;
+    draw();
+
+    let dragging = false, lastX=0, lastY=0;
+    function toLocal(evt){
+      const rect = canvas.getBoundingClientRect();
+      const cx = (evt.touches ? evt.touches[0].clientX : evt.clientX) - rect.left;
+      const cy = (evt.touches ? evt.touches[0].clientY : evt.clientY) - rect.top;
+      return { x: cx*(canvas.width/rect.width), y: cy*(canvas.height/rect.height) };
+    }
+    function start(evt){ if(src.seqFit!=="cover") return; dragging=true; const p=toLocal(evt); lastX=p.x; lastY=p.y; evt.preventDefault(); }
+    function move(evt){
+      if(!dragging) return;
+      const p = toLocal(evt);
+      const dxPix = p.x-lastX, dyPix = p.y-lastY;
+      lastX=p.x; lastY=p.y;
+      const sw=src.natW, sh=src.natH, boxW=canvas.width, boxH=canvas.height;
+      const scaleShow = Math.min(boxW/sw, boxH/sh);
+      const ow = Math.max(2, parseInt(el.outW.value||"1",10));
+      const oh = Math.max(2, parseInt(el.outH.value||"1",10));
+      const scale = Math.max(ow/sw, oh/sh);
+      const excessX = sw*scale-ow, excessY = sh*scale-oh;
+      if(excessX>0.5) src.seqOffsetX = Math.min(1, Math.max(0, src.seqOffsetX-(dxPix/scaleShow)/excessX));
+      if(excessY>0.5) src.seqOffsetY = Math.min(1, Math.max(0, src.seqOffsetY-(dyPix/scaleShow)/excessY));
+      draw(); evt.preventDefault();
+    }
+    function end(){ dragging=false; }
+    canvas.addEventListener("mousedown", start);
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", end);
+    canvas.addEventListener("touchstart", start, {passive:false});
+    window.addEventListener("touchmove", move, {passive:false});
+    window.addEventListener("touchend", end);
+  }
+
+  function redrawAllSeqPreviews(){ sources.forEach(s => s._redrawPreview && s._redrawPreview()); }
+  el.outW.addEventListener("input", redrawAllSeqPreviews);
+  el.outH.addEventListener("input", redrawAllSeqPreviews);
+
+  function updateSeqStats(){
+    el.statClips.textContent = sources.length;
+    let totalFrames = 0, totalMs = 0;
+    sources.forEach(src => {
+      if(src.kind === "gif"){
+        clampTrim(src);
+        for(let i=src.seqStart-1;i<=src.seqEnd-1;i++){ totalFrames++; totalMs += src.frames[i].delay; }
+      } else {
+        totalFrames++;
+        totalMs += src.seqDuration != null ? src.seqDuration : Math.max(50, Math.round(parseFloat(el.imgDuration.value||"0.5")*1000));
+      }
+    });
+    el.statFrames.textContent = totalFrames;
+    el.statDuration.textContent = (totalMs/1000).toFixed(1)+"s";
+  }
+  el.imgDuration.addEventListener("input", updateSeqStats);
+
+  el.presetSmallest.addEventListener("click", () => {
+    if(!sources.length) return;
+    el.outW.value = Math.min(...sources.map(s=>s.natW));
+    el.outH.value = Math.min(...sources.map(s=>s.natH));
+    redrawAllSeqPreviews();
+  });
+  el.presetLargest.addEventListener("click", () => {
+    if(!sources.length) return;
+    el.outW.value = Math.max(...sources.map(s=>s.natW));
+    el.outH.value = Math.max(...sources.map(s=>s.natH));
+    redrawAllSeqPreviews();
+  });
+
+  /* =========================================================
+     GRID MODE UI  (adapted from gif-grid-studio; drag is
+     simplified to plain freeform reposition — no snap-to-swap
+     magic — see README note)
+  ========================================================= */
+  const gridState = {
+    presetKey: "sq480", customW: 480, customH: 480, orientation: "portrait",
+    margin: { top:20, right:20, bottom:20, left:20 }, linkMargins: true,
+    spacing: 12, globalScale: 1, layoutMode: "grid",
+    showGuides: true, locked: false, fps: 10, maxDurationS: 5, transparentBg: false
+  };
+  let selectedGridId = null;
+  const boxEls = {};
+
+  PRESETS.forEach(p => { const o=document.createElement("option"); o.value=p.key; o.textContent=p.label; el.presetSelect.appendChild(o); });
+  el.presetSelect.value = gridState.presetKey;
+  LAYOUT_MODES.forEach(m => {
+    const btn = document.createElement("button");
+    btn.className = "layout-btn"+(m.key===gridState.layoutMode?" active":"");
+    btn.dataset.key = m.key;
+    btn.innerHTML = `<div><div class="layout-btn-title">${m.label}</div><div class="layout-btn-desc">${m.desc}</div></div>`;
+    btn.addEventListener("click", () => {
+      gridState.layoutMode = m.key;
+      Array.from(el.layoutOptions.children).forEach(c => c.classList.toggle("active", c.dataset.key===m.key));
+      fullRelayout();
+    });
+    el.layoutOptions.appendChild(btn);
+  });
+
+  function getBaseDims(){
+    const preset = PRESETS.find(p => p.key===gridState.presetKey);
+    let w = preset.key==="custom" ? Number(gridState.customW)||16 : preset.w;
+    let h = preset.key==="custom" ? Number(gridState.customH)||16 : preset.h;
+    return {w,h};
+  }
+  function getGeometry(){
+    const {w:baseW,h:baseH} = getBaseDims();
+    let boardW = Math.min(baseW,baseH), boardH = Math.max(baseW,baseH);
+    if(gridState.orientation==="landscape"){ const t=boardW; boardW=boardH; boardH=t; }
+    if(baseW===baseH){ boardW=baseW; boardH=baseH; }
+    const displayScale = Math.min(PREVIEW_MAX_W/boardW, PREVIEW_MAX_H/boardH, 1);
+    return { baseW, baseH, boardW, boardH, displayScale, marginsPx: gridState.margin, spacingPx: gridState.spacing };
+  }
+  const fmt = n => (Math.round(n*10)/10).toString();
+
+  function updatePosterFrame(){
+    const g = getGeometry();
+    el.customSizeRow.style.display = gridState.presetKey==="custom" ? "flex" : "none";
+    document.getElementById("orientationGroup").style.display = g.baseW===g.baseH ? "none" : "flex";
+    el.canvasSizeReadout.textContent = g.boardW+" \u00d7 "+g.boardH+" px";
+    el.headerSizeReadout.textContent = "\u2014 "+g.boardW+"\u00d7"+g.boardH+" px";
+    el.board.style.width = (g.boardW*g.displayScale)+"px";
+    el.board.style.height = (g.boardH*g.displayScale)+"px";
+    el.marginGuideEl.style.display = gridState.showGuides ? "block" : "none";
+    el.marginGuideEl.style.left = (g.marginsPx.left*g.displayScale)+"px";
+    el.marginGuideEl.style.top = (g.marginsPx.top*g.displayScale)+"px";
+    el.marginGuideEl.style.width = ((g.boardW-g.marginsPx.left-g.marginsPx.right)*g.displayScale)+"px";
+    el.marginGuideEl.style.height = ((g.boardH-g.marginsPx.top-g.marginsPx.bottom)*g.displayScale)+"px";
+    if(document.activeElement!==el.marginLinked) el.marginLinked.value = fmt(gridState.margin.top);
+    if(document.activeElement!==el.marginTop) el.marginTop.value = fmt(gridState.margin.top);
+    if(document.activeElement!==el.marginRight) el.marginRight.value = fmt(gridState.margin.right);
+    if(document.activeElement!==el.marginBottom) el.marginBottom.value = fmt(gridState.margin.bottom);
+    if(document.activeElement!==el.marginLeft) el.marginLeft.value = fmt(gridState.margin.left);
+    if(document.activeElement!==el.customW) el.customW.value = gridState.customW;
+    if(document.activeElement!==el.customH) el.customH.value = gridState.customH;
+
+    const has = sources.length>0;
+    el.emptyBoard.style.display = has ? "none" : "flex";
+    el.board.style.display = has ? "block" : "none";
+    el.board.classList.toggle("checker", gridState.transparentBg);
+  }
+
+  function updateImagePosition(src){
+    const g = getGeometry();
+    const box = boxEls[src.id];
+    if(!box) return;
+    box.style.left = (src.gridX*g.displayScale)+"px";
+    box.style.top = (src.gridY*g.displayScale)+"px";
+    box.style.width = (src.gridW*g.displayScale)+"px";
+    box.style.height = (src.gridH*g.displayScale)+"px";
+  }
+
+  function updateOverflowWarning(){
+    const g = getGeometry();
+    const availH = g.boardH-g.marginsPx.top-g.marginsPx.bottom;
+    const contentBottom = sources.reduce((m,s) => Math.max(m, s.gridY+s.gridH), 0);
+    const overflowing = sources.length>0 && contentBottom > g.marginsPx.top+availH+2 &&
+      (gridState.layoutMode==="sequential" || gridState.layoutMode==="justified");
+    el.overflowWarning.classList.toggle("show", overflowing);
+  }
+
+  function fullRelayout(force){
+    updatePosterFrame();
+    if(sources.length===0) return;
+    if(gridState.locked && !force){ sources.forEach(updateImagePosition); updateOverflowWarning(); return; }
+    const g = getGeometry();
+    const layout = computeLayout(sources, gridState.layoutMode, g.boardW, g.boardH, g.marginsPx, g.spacingPx, gridState.globalScale);
+    const map = Object.fromEntries(layout.map(l => [l.id,l]));
+    sources.forEach(src => {
+      const base = map[src.id];
+      if(!base) return;
+      const s = src.gridScale||1;
+      const w = base.w*s, h = base.h*s;
+      const cx = base.x+base.w/2, cy = base.y+base.h/2;
+      src.gridBaseW = base.w; src.gridBaseH = base.h;
+      src.gridW = w; src.gridH = h; src.gridX = cx-w/2; src.gridY = cy-h/2;
+    });
+    sources.forEach(updateImagePosition);
+    updateOverflowWarning();
+  }
+
+  function getDefaultPlacement(natW, natH){
+    const g = getGeometry();
+    const availW = g.boardW-g.marginsPx.left-g.marginsPx.right;
+    const availH = g.boardH-g.marginsPx.top-g.marginsPx.bottom;
+    const r = natW/natH;
+    let targetH = sources.length>0 ? sources.reduce((s,im)=>s+im.gridH,0)/sources.length : availH*0.3;
+    const w = targetH*r, h = targetH;
+    const cascade = (sources.length%6)*14;
+    const x = g.marginsPx.left + clamp((availW-w)/2+cascade, 0, Math.max(0, availW-w));
+    const y = g.marginsPx.top + clamp((availH-h)/2+cascade, 0, Math.max(0, availH-h));
+    return {x,y,w,h};
+  }
+  function placeNewGridImage(src){
+    const p = getDefaultPlacement(src.natW, src.natH);
+    src.gridX=p.x; src.gridY=p.y; src.gridW=p.w; src.gridH=p.h;
+    src.gridBaseW=p.w; src.gridBaseH=p.h; src.gridScale=1;
+  }
+
+  function selectGridImage(id){
+    selectedGridId = id;
+    Object.keys(boxEls).forEach(k => {
+      const isSel = k===id;
+      boxEls[k].classList.toggle("selected", isSel);
+      boxEls[k].querySelector(".img-remove").style.display = isSel ? "flex" : "none";
+    });
+    const src = sources.find(s => s.id===id);
+    if(src){
+      el.gridSelectedPanel.style.display = "block";
+      el.selectedScaleSlider.value = src.gridScale||1;
+      el.selectedScaleReadout.textContent = Math.round((src.gridScale||1)*100)+"%";
+    } else {
+      el.gridSelectedPanel.style.display = "none";
+    }
+  }
+
+  function createImageBox(src){
+    const box = document.createElement("div");
+    box.className = "img-box";
+    box.dataset.id = src.id;
+    const img = document.createElement("img");
+    img.src = src.previewUrl;
+    img.draggable = false;
+    box.appendChild(img);
+    const rm = document.createElement("div");
+    rm.className = "img-remove";
+    rm.textContent = "\u2715";
+    rm.addEventListener("pointerdown", e => e.stopPropagation());
+    rm.addEventListener("click", e => { e.stopPropagation(); removeSource(src.id); });
+    box.appendChild(rm);
+    box.addEventListener("pointerdown", e => onPointerDownImage(e, src.id));
+    box.addEventListener("click", e => e.stopPropagation());
+    el.board.appendChild(box);
+    boxEls[src.id] = box;
+  }
+
+  function renderGridBoard(rebuild){
+    if(rebuild){
+      Object.values(boxEls).forEach(b => b.remove());
+      for(const k in boxEls) delete boxEls[k];
+      sources.forEach(createImageBox);
+    }
+    fullRelayout();
+  }
+
+  let dragState = null;
+  function onPointerMove(e){
+    if(!dragState) return;
+    const g = getGeometry();
+    const dx = (e.clientX-dragState.startClientX)/g.displayScale;
+    const dy = (e.clientY-dragState.startClientY)/g.displayScale;
+    const src = sources.find(s => s.id===dragState.id);
+    if(!src) return;
+    src.gridX = dragState.startX+dx;
+    src.gridY = dragState.startY+dy;
+    updateImagePosition(src);
+  }
+  function onPointerUp(){
+    dragState = null;
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+    updateOverflowWarning();
+  }
+  function onPointerDownImage(e, id){
+    e.stopPropagation();
+    selectGridImage(id);
+    const src = sources.find(s => s.id===id);
+    if(!src) return;
+    dragState = { id, startClientX:e.clientX, startClientY:e.clientY, startX:src.gridX, startY:src.gridY };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+  }
+  document.addEventListener("keydown", e => {
+    if((e.key==="Delete"||e.key==="Backspace") && selectedGridId && mode==="grid"){
+      const active = document.activeElement;
+      if(active && (active.tagName==="INPUT"||active.tagName==="TEXTAREA")) return;
+      e.preventDefault();
+      removeSource(selectedGridId);
+    }
+  });
+  document.getElementById("board").addEventListener("click", e => { if(e.target===el.board) selectGridImage(null); });
+
+  el.presetSelect.addEventListener("change", e => { gridState.presetKey = e.target.value; fullRelayout(); });
+  el.customW.addEventListener("input", e => { gridState.customW = e.target.value; fullRelayout(); });
+  el.customH.addEventListener("input", e => { gridState.customH = e.target.value; fullRelayout(); });
+  el.btnPortrait.addEventListener("click", () => { gridState.orientation="portrait"; el.btnPortrait.classList.add("active"); el.btnLandscape.classList.remove("active"); fullRelayout(); });
+  el.btnLandscape.addEventListener("click", () => { gridState.orientation="landscape"; el.btnLandscape.classList.add("active"); el.btnPortrait.classList.remove("active"); fullRelayout(); });
+
+  el.linkMargins.addEventListener("change", e => {
+    gridState.linkMargins = e.target.checked;
+    el.marginLinked.style.display = gridState.linkMargins ? "block" : "none";
+    el.marginGrid.style.display = gridState.linkMargins ? "none" : "flex";
+    el.marginGrid2.style.display = gridState.linkMargins ? "none" : "flex";
+    if(gridState.linkMargins){ const v=gridState.margin.top; gridState.margin={top:v,right:v,bottom:v,left:v}; fullRelayout(); }
+  });
+  el.marginLinked.addEventListener("input", e => { const v=Number(e.target.value)||0; gridState.margin={top:v,right:v,bottom:v,left:v}; fullRelayout(); });
+  el.marginTop.addEventListener("input", e => { gridState.margin.top = Number(e.target.value)||0; fullRelayout(); });
+  el.marginRight.addEventListener("input", e => { gridState.margin.right = Number(e.target.value)||0; fullRelayout(); });
+  el.marginBottom.addEventListener("input", e => { gridState.margin.bottom = Number(e.target.value)||0; fullRelayout(); });
+  el.marginLeft.addEventListener("input", e => { gridState.margin.left = Number(e.target.value)||0; fullRelayout(); });
+
+  el.spacingSlider.addEventListener("input", e => { gridState.spacing = Number(e.target.value); el.spacingReadout.textContent = fmt(gridState.spacing)+" px"; fullRelayout(); });
+  el.globalScaleSlider.addEventListener("input", e => { gridState.globalScale = Number(e.target.value); el.globalScaleReadout.textContent = Math.round(gridState.globalScale*100)+"%"; fullRelayout(); });
+  el.selectedScaleSlider.addEventListener("input", e => {
+    if(!selectedGridId) return;
+    const src = sources.find(s => s.id===selectedGridId);
+    if(!src) return;
+    const newScale = Number(e.target.value);
+    const bw = src.gridBaseW||src.gridW, bh = src.gridBaseH||src.gridH;
+    const w = bw*newScale, h = bh*newScale;
+    const cx = src.gridX+src.gridW/2, cy = src.gridY+src.gridH/2;
+    src.gridScale = newScale; src.gridW = w; src.gridH = h; src.gridX = cx-w/2; src.gridY = cy-h/2;
+    updateImagePosition(src);
+    el.selectedScaleReadout.textContent = Math.round(newScale*100)+"%";
+    updateOverflowWarning();
+  });
+
+  el.fpsSlider.addEventListener("input", e => { gridState.fps = Number(e.target.value); el.fpsReadout.textContent = gridState.fps+" fps"; });
+  el.maxDurSlider.addEventListener("input", e => { gridState.maxDurationS = Number(e.target.value); el.maxDurReadout.textContent = fmt(gridState.maxDurationS)+"s"; });
+  el.showGuides.addEventListener("change", e => { gridState.showGuides = e.target.checked; updatePosterFrame(); });
+  el.lockArrangement.addEventListener("change", e => { gridState.locked = e.target.checked; });
+  el.transparentBg.addEventListener("change", e => { gridState.transparentBg = e.target.checked; updatePosterFrame(); });
+  el.arrangeBtn.addEventListener("click", e => { e.stopPropagation(); fullRelayout(true); });
+
+  /* =========================================================
+     EXPORT (shared modal, per-mode pipeline)
+  ========================================================= */
+  let workerUrl = null;
+  function getWorkerBlobUrl(){
+    if(workerUrl) return Promise.resolve(workerUrl);
+    return fetch("https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js")
+      .then(r => { if(!r.ok) throw new Error("worker fetch failed"); return r.blob(); })
+      .then(blob => { workerUrl = URL.createObjectURL(blob); return workerUrl; });
+  }
+  function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+  let currentGif = null;
+  function showProgress(){
+    el.exportModal.classList.add("show");
+    el.progressView.style.display = "block";
+    el.resultView.style.display = "none";
+    el.progressFill.style.width = "0%";
+  }
+  function showResult(blob, meta){
+    const url = URL.createObjectURL(blob);
+    el.progressView.style.display = "none";
+    el.resultView.style.display = "block";
+    el.resultImg.src = url;
+    el.downloadLink.href = url;
+    el.resultMeta.textContent = meta;
+    setStatus("Export complete.");
+  }
+
+  async function exportSequence(){
+    const ow = Math.max(2, parseInt(el.outW.value||"480",10));
+    const oh = Math.max(2, parseInt(el.outH.value||"320",10));
+    const bg = el.bgColor.value;
+    const quality = parseInt(el.seqQuality.value,10);
+    const repeat = parseInt(el.seqLoop.value,10)===1 ? 1 : 0;
+    const defaultDur = Math.max(50, Math.round(parseFloat(el.imgDuration.value||"0.5")*1000));
+
+    el.progressText.textContent = "Preparing frames\u2026";
+    await sleep(0);
+
+    const scratch = document.createElement("canvas");
+    scratch.width = ow; scratch.height = oh;
+    const sctx = scratch.getContext("2d");
+    const wUrl = await getWorkerBlobUrl();
+    const gif = new GIF({ workers:3, quality, width:ow, height:oh, workerScript:wUrl, repeat });
+    currentGif = gif;
+
+    let added = 0;
+    sources.forEach(src => {
+      if(src.kind === "gif"){
+        clampTrim(src);
+        for(let i=src.seqStart-1;i<=src.seqEnd-1;i++){
+          const frame = src.frames[i];
+          renderFrameToOutput(sctx, frame.canvas, src, ow, oh, bg);
+          gif.addFrame(sctx, { delay: frame.delay, copy:true });
+          added++;
+        }
+      } else {
+        renderFrameToOutput(sctx, src.frames[0].canvas, src, ow, oh, bg);
+        gif.addFrame(sctx, { delay: src.seqDuration != null ? src.seqDuration : defaultDur, copy:true });
+        added++;
+      }
+    });
+
+    if(added === 0) throw new Error("No frames to export — check each source's trim range.");
+
+    el.progressText.textContent = "Encoding\u2026 0%";
+    gif.on("progress", p => { el.progressFill.style.width = Math.round(p*100)+"%"; el.progressText.textContent = "Encoding\u2026 "+Math.round(p*100)+"%"; });
+    gif.on("finished", blob => {
+      showResult(blob, ow+"\u00d7"+oh+" \u00b7 "+added+" frames \u00b7 "+Math.round(blob.size/1024)+" KB");
+      currentGif = null;
+    });
+    gif.render();
+  }
+
+  function pickFrameCanvas(src, tMs){
+    if(src.kind !== "gif" || src.frames.length <= 1) return src.frames[0].canvas;
+    const total = src.loopDuration;
+    const tm = ((tMs % total) + total) % total;
+    let accum = 0;
+    for(const f of src.frames){ accum += f.delay; if(tm < accum) return f.canvas; }
+    return src.frames[src.frames.length-1].canvas;
+  }
+
+  async function exportGrid(){
+    const g = getGeometry();
+    const animatedDurations = sources.filter(s => s.kind==="gif" && s.frames.length>1).map(s => s.loopDuration);
+    const longest = animatedDurations.length ? Math.max(...animatedDurations) : 1500;
+    const outputDurationMs = Math.min(longest, gridState.maxDurationS*1000);
+    const frameIntervalMs = 1000/gridState.fps;
+    const frameCount = Math.max(1, Math.round(outputDurationMs/frameIntervalMs));
+
+    el.progressText.textContent = "Compositing frames (0/"+frameCount+")\u2026";
+    await sleep(0);
+
+    const CHROMA_R=1, CHROMA_G=254, CHROMA_B=1;
+    const CHROMA_HEX = (CHROMA_R<<16)|(CHROMA_G<<8)|CHROMA_B;
+    const wUrl = await getWorkerBlobUrl();
+    const gifOptions = { workers:2, quality:10, width:g.boardW, height:g.boardH, workerScript:wUrl };
+    if(gridState.transparentBg) gifOptions.transparent = CHROMA_HEX;
+    const gif = new GIF(gifOptions);
+    currentGif = gif;
+
+    const master = document.createElement("canvas");
+    master.width = g.boardW; master.height = g.boardH;
+    const mctx = master.getContext("2d");
+
+    for(let i=0;i<frameCount;i++){
+      const t = i*frameIntervalMs;
+      if(gridState.transparentBg) mctx.clearRect(0,0,master.width,master.height);
+      else { mctx.fillStyle = "#ffffff"; mctx.fillRect(0,0,master.width,master.height); }
+      for(const src of sources){
+        const frameCanvas = pickFrameCanvas(src, t);
+        mctx.drawImage(frameCanvas, src.gridX, src.gridY, src.gridW, src.gridH);
+      }
+      if(gridState.transparentBg){
+        const imgData = mctx.getImageData(0,0,master.width,master.height);
+        const d = imgData.data;
+        for(let p=0;p<d.length;p+=4){ if(d[p+3]===0){ d[p]=CHROMA_R; d[p+1]=CHROMA_G; d[p+2]=CHROMA_B; d[p+3]=255; } }
+        mctx.putImageData(imgData, 0, 0);
+      }
+      gif.addFrame(mctx, { copy:true, delay:frameIntervalMs });
+      if(i%3===0){ el.progressFill.style.width = Math.round((i/frameCount)*50)+"%"; el.progressText.textContent = "Compositing frames ("+(i+1)+"/"+frameCount+")\u2026"; await sleep(0); }
+    }
+
+    gif.on("progress", p => { el.progressFill.style.width = Math.round(50+p*50)+"%"; el.progressText.textContent = "Encoding\u2026 "+Math.round(p*100)+"%"; });
+    gif.on("finished", blob => {
+      showResult(blob, g.boardW+"\u00d7"+g.boardH+" \u00b7 "+frameCount+" frames \u00b7 "+Math.round(blob.size/1024)+" KB");
+      currentGif = null;
+    });
+    gif.render();
+  }
+
+  el.exportBtn.addEventListener("click", async () => {
+    if(sources.length < 2) return;
+    showProgress();
+    try{
+      if(mode === "sequence") await exportSequence();
+      else await exportGrid();
+    } catch(err){
+      console.error(err);
+      el.exportModal.classList.remove("show");
+      setStatus("Export failed: "+err.message, true);
+    }
+  });
+  el.cancelBtn.addEventListener("click", () => {
+    if(currentGif){ try{ currentGif.abort(); }catch(e){} currentGif = null; }
+    el.exportModal.classList.remove("show");
+  });
+  el.closeModalBtn.addEventListener("click", () => el.exportModal.classList.remove("show"));
+
+  /* =========================================================
+     INIT
+  ========================================================= */
+  el.spacingSlider.value = gridState.spacing; el.spacingReadout.textContent = fmt(gridState.spacing)+" px";
+  el.globalScaleSlider.value = gridState.globalScale; el.globalScaleReadout.textContent = Math.round(gridState.globalScale*100)+"%";
+  el.fpsSlider.value = gridState.fps; el.fpsReadout.textContent = gridState.fps+" fps";
+  el.maxDurSlider.value = gridState.maxDurationS; el.maxDurReadout.textContent = fmt(gridState.maxDurationS)+"s";
+  updatePosterFrame();
+  updateExportEnabled();
+  renderSeqList();
+
+})();
+</script>
+</body>
+</html>

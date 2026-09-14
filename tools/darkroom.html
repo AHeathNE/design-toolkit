@@ -1,0 +1,1099 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Darkroom — Image Effects Studio</title>
+<style>
+  :root {
+    --bg: #16161a;
+    --panel: #1f1f24;
+    --panel-2: #131316;
+    --border: #2e2e35;
+    --border-strong: #3d3d46;
+    --text: #f2f2f0;
+    --muted: #9a9aa2;
+    --accent: #e8e6df;
+    --accent-dim: #b9b7ae;
+    --danger: #e2734f;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    height: 100%;
+  }
+  .app {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    min-height: 100vh;
+  }
+  @media (max-width: 820px) {
+    .app { grid-template-columns: 1fr; }
+    .sidebar { order: 2; border-right: none; border-top: 1px solid var(--border); }
+  }
+
+  /* ---- sidebar ---- */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    padding: 22px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .brand {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 0 4px;
+  }
+  .brand .name { font-size: 1.05rem; font-weight: 700; letter-spacing: 0.01em; }
+  .brand .tag { font-size: 0.78rem; color: var(--muted); }
+
+  .drop {
+    border: 1.5px dashed var(--border-strong);
+    border-radius: var(--radius);
+    padding: 20px 12px;
+    text-align: center;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 0.85rem;
+    transition: border-color .15s, color .15s;
+  }
+  .drop:hover, .drop.drag { border-color: var(--accent); color: var(--text); }
+  .drop .fname { margin-top: 6px; font-size: 0.76rem; color: var(--accent-dim); word-break: break-all; }
+  input[type=file] { display: none; }
+
+  nav.steps { display: flex; flex-direction: column; gap: 4px; }
+  nav.steps .step-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: none;
+    border: none;
+    color: var(--muted);
+    text-align: left;
+    padding: 9px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.88rem;
+    font-family: inherit;
+  }
+  nav.steps .step-btn:hover:not(:disabled) { background: var(--panel); color: var(--text); }
+  nav.steps .step-btn.active { background: var(--panel); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
+  nav.steps .step-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  nav.steps .grp-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 10px 0 2px 10px; }
+
+  .sidebar-foot { margin-top: auto; font-size: 0.74rem; color: var(--muted); padding: 0 4px; line-height: 1.5; }
+  .reset-link { background:none; border:none; color:var(--accent-dim); font-size:0.78rem; cursor:pointer; padding:0; text-decoration:underline; text-underline-offset:2px; }
+
+  /* ---- main ---- */
+  main { padding: 28px 30px 60px; max-width: 980px; }
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    color: var(--muted);
+    margin-top: 60px;
+  }
+  .empty-state h1 { color: var(--text); font-size: 1.3rem; margin: 0; }
+
+  .panel-title { font-size: 1.15rem; font-weight: 700; margin: 0 0 4px; }
+  .panel-sub { color: var(--muted); font-size: 0.86rem; margin: 0 0 20px; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 18px;
+  }
+  .row { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 0.8rem; color: var(--muted); display: flex; justify-content: space-between; gap: 10px; }
+  input[type=range] { width: 180px; accent-color: var(--accent); }
+  input[type=number] {
+    width: 80px; background: var(--panel-2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 6px; padding: 6px 8px; font-size: 0.86rem;
+  }
+  select {
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 7px 8px; font-size: 0.86rem;
+  }
+  .checkline { display: flex; align-items: center; gap: 8px; font-size: 0.86rem; color: var(--text); }
+  .checkline input { width: 16px; height: 16px; }
+
+  .btnrow { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  button.primary, button.secondary {
+    border-radius: 8px; padding: 9px 16px; font-size: 0.86rem; font-weight: 600;
+    cursor: pointer; border: 1px solid transparent; font-family: inherit;
+  }
+  button.primary { background: var(--accent); color: #16161a; }
+  button.primary:hover:not(:disabled) { opacity: 0.88; }
+  button.primary:disabled { opacity: 0.35; cursor: not-allowed; }
+  button.secondary { background: var(--panel-2); border-color: var(--border-strong); color: var(--text); }
+  button.secondary:hover { border-color: var(--accent); }
+
+  .preview-wrap {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    text-align: center;
+    min-height: 140px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+  .preview-wrap canvas { max-width: 100%; max-height: 60vh; border-radius: 6px; image-rendering: pixelated; }
+  .preview-hint { color: var(--muted); font-size: 0.86rem; }
+  .checker {
+    background-image: linear-gradient(45deg,#333 25%,transparent 25%),linear-gradient(-45deg,#333 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#333 75%),linear-gradient(-45deg,transparent 75%,#333 75%);
+    background-size: 16px 16px; background-position: 0 0,0 8px,8px -8px,-8px 0;
+  }
+
+  .dims-tag { font-size: 0.78rem; color: var(--muted); margin-top: 8px; }
+
+  /* crop overlay */
+  #cropStage { position: relative; display: inline-block; }
+  #cropStage canvas { display: block; }
+  #cropbox {
+    position: absolute;
+    outline: 2px solid #6cb2ff;
+    box-shadow: 0 0 0 9999px rgba(0,0,0,0.55);
+    cursor: move;
+  }
+  .handle { position: absolute; width: 12px; height: 12px; background: #6cb2ff; border: 2px solid #16161a; border-radius: 2px; }
+  .handle.nw { top: -6px; left: -6px; cursor: nwse-resize; }
+  .handle.ne { top: -6px; right: -6px; cursor: nesw-resize; }
+  .handle.sw { bottom: -6px; left: -6px; cursor: nesw-resize; }
+  .handle.se { bottom: -6px; right: -6px; cursor: nwse-resize; }
+
+  .swatch-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .swatch-grid input[type=color] { width: 34px; height: 34px; border: 1px solid var(--border-strong); border-radius: 6px; padding: 0; background: none; cursor: pointer; }
+
+  .color-field { display: flex; align-items: center; gap: 8px; }
+  .color-field label { font-size: 0.8rem; color: var(--muted); min-width: 66px; }
+  input[type=color] { width: 38px; height: 38px; border: none; border-radius: 8px; background: none; cursor: pointer; padding: 0; }
+  input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
+  input[type=color]::-webkit-color-swatch { border: 1px solid var(--border); border-radius: 8px; }
+  .hex { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 8px; font-size: 0.8rem; width: 84px; font-family: monospace; }
+
+  .status-msg { font-size: 0.8rem; color: #8fd19e; margin-top: 8px; min-height: 1em; }
+  fieldset { border: 1px solid var(--border); border-radius: 10px; margin: 0 0 14px; padding: 14px 16px; }
+  legend { padding: 0 6px; font-size: 0.8rem; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="name">Darkroom</div>
+      <div class="tag">Image effects studio</div>
+    </div>
+
+    <div class="drop" id="drop">
+      <div id="dropText">Click or drag an image here</div>
+      <div class="fname" id="fname"></div>
+    </div>
+    <input type="file" id="fileInput" accept="image/*">
+
+    <nav class="steps" id="stepsNav">
+      <div class="grp-label">Prepare</div>
+      <button class="step-btn" data-step="crop" disabled>&#9670; Crop &amp; resize</button>
+      <div class="grp-label">Effects</div>
+      <button class="step-btn" data-step="adjust" disabled>&#9670; Adjust / cutout</button>
+      <button class="step-btn" data-step="duotone" disabled>&#9670; Duotone</button>
+      <button class="step-btn" data-step="posterize" disabled>&#9670; Posterize</button>
+      <button class="step-btn" data-step="shift" disabled>&#9670; Pixel shift</button>
+      <button class="step-btn" data-step="bitmap" disabled>&#9670; Bitmap (.bmp)</button>
+    </nav>
+
+    <div class="sidebar-foot">
+      Everything runs in your browser — nothing is uploaded.<br>
+      <button class="reset-link" id="resetAllBtn" style="display:none; margin-top:8px;">Reset to original image</button>
+    </div>
+  </aside>
+
+  <main id="main">
+    <div class="empty-state" id="emptyState">
+      <h1>Load an image to get started</h1>
+      <p>Crop or resize it, then pick an effect — adjust/cutout, duotone, posterize, pixel-shift glitch, or export it as a bitmap.</p>
+    </div>
+
+    <!-- CROP & RESIZE -->
+    <section class="tab-panel" id="panel-crop" style="display:none;">
+      <div class="panel-title">Crop &amp; resize</div>
+      <p class="panel-sub">Drag the box to crop, then optionally set an exact output size. Apply to carry the result into the effects below.</p>
+
+      <div class="card">
+        <div class="row" style="margin-bottom:14px;">
+          <span style="font-size:0.8rem;color:var(--muted);">Ratio:</span>
+          <button class="secondary" data-ratio="free">Free</button>
+          <button class="secondary" data-ratio="1:1">1:1</button>
+          <button class="secondary" data-ratio="4:3">4:3</button>
+          <button class="secondary" data-ratio="16:9">16:9</button>
+          <input type="number" id="ratioW" placeholder="W" style="width:50px">
+          <span>:</span>
+          <input type="number" id="ratioH" placeholder="H" style="width:50px">
+          <button class="secondary" id="applyCustomRatio">Set</button>
+        </div>
+        <div id="cropStage">
+          <canvas id="cropCanvas"></canvas>
+          <div id="cropbox">
+            <div class="handle nw" data-handle="nw"></div>
+            <div class="handle ne" data-handle="ne"></div>
+            <div class="handle sw" data-handle="sw"></div>
+            <div class="handle se" data-handle="se"></div>
+          </div>
+        </div>
+        <div class="dims-tag" id="cropDims"></div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <div class="field">
+            <label>Width</label>
+            <input type="number" id="resizeW" min="1">
+          </div>
+          <div class="field">
+            <label>Height</label>
+            <input type="number" id="resizeH" min="1">
+          </div>
+          <label class="checkline"><input type="checkbox" id="lockAspect" checked> Lock aspect ratio</label>
+          <div class="field">
+            <label>Fit</label>
+            <select id="fitMode">
+              <option value="stretch">Stretch to exact size</option>
+              <option value="fill">Fill and crop</option>
+              <option value="pad">Fit and pad</option>
+            </select>
+          </div>
+        </div>
+        <div class="btnrow">
+          <button class="primary" id="applyCropResize">Apply crop &amp; resize</button>
+          <button class="secondary" id="skipToEffects">Skip — use full image</button>
+          <button class="secondary" id="downloadCropBtn">Download this image</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ADJUST / CUTOUT -->
+    <section class="tab-panel" id="panel-adjust" style="display:none;">
+      <div class="panel-title">Adjust / cutout</div>
+      <p class="panel-sub">Contrast, black &amp; white, and knock out a background color to transparency.</p>
+      <div class="card">
+        <div class="row">
+          <div class="field" style="width:220px;">
+            <label>Contrast boost <span id="adjContrastVal">0</span></label>
+            <input type="range" id="adjContrast" min="0" max="150" value="0">
+          </div>
+          <label class="checkline"><input type="checkbox" id="adjGray"> Black &amp; white</label>
+          <label class="checkline"><input type="checkbox" id="adjForceBlack"> Make non-white pixels black</label>
+        </div>
+        <div class="row" style="margin-top:14px;">
+          <label class="checkline"><input type="checkbox" id="adjTransparent"> Remove white background</label>
+          <div class="field" style="width:200px;">
+            <label>White threshold <span id="adjThreshVal">235</span></label>
+            <input type="range" id="adjThresh" min="180" max="255" value="235">
+          </div>
+          <div class="field" style="width:200px;">
+            <label>Edge softness <span id="adjFeatherVal">20</span></label>
+            <input type="range" id="adjFeather" min="0" max="60" value="20">
+          </div>
+        </div>
+        <div class="btnrow"><button class="primary" id="downloadAdjust">Download PNG</button></div>
+      </div>
+      <div class="preview-wrap checker"><canvas id="adjustCanvas"></canvas></div>
+    </section>
+
+    <!-- DUOTONE -->
+    <section class="tab-panel" id="panel-duotone" style="display:none;">
+      <div class="panel-title">Duotone</div>
+      <p class="panel-sub">Map shadows and highlights to two colors.</p>
+      <div class="card">
+        <div class="row">
+          <div class="color-field">
+            <label>Shadows</label>
+            <input type="color" id="duoColor1" value="#1a1a2e">
+            <input type="text" class="hex" id="duoHex1" value="#1a1a2e">
+          </div>
+          <button class="secondary" id="duoSwap" title="Swap colors">&#8644;</button>
+          <div class="color-field">
+            <label>Highlights</label>
+            <input type="color" id="duoColor2" value="#f4a261">
+            <input type="text" class="hex" id="duoHex2" value="#f4a261">
+          </div>
+        </div>
+        <div class="field" style="margin-top:14px; width:280px;">
+          <label>Midpoint balance <span id="duoMidVal">50%</span></label>
+          <input type="range" id="duoMid" min="0" max="100" value="50" style="width:100%;">
+        </div>
+        <div class="btnrow"><button class="primary" id="downloadDuotone">Download PNG</button></div>
+      </div>
+      <div class="preview-wrap"><canvas id="duotoneCanvas"></canvas></div>
+    </section>
+
+    <!-- POSTERIZE -->
+    <section class="tab-panel" id="panel-posterize" style="display:none;">
+      <div class="panel-title">Posterize</div>
+      <p class="panel-sub">Reduce colors to flat levels, then tweak the resulting palette.</p>
+      <div class="card">
+        <div class="row">
+          <div class="field" style="width:220px;">
+            <label>Levels per channel <span id="posterLevelsVal">4</span></label>
+            <input type="range" id="posterLevels" min="2" max="8" value="4">
+          </div>
+          <button class="primary" id="applyPosterize">Posterize</button>
+        </div>
+        <div id="posterPaletteWrap" style="display:none; margin-top:16px;">
+          <div style="font-size:0.8rem; color:var(--muted); margin-bottom:8px;">Click a swatch to recolor it:</div>
+          <div class="swatch-grid" id="posterSwatches"></div>
+          <div class="btnrow">
+            <button class="secondary" id="posterShuffle">Shuffle colors</button>
+            <button class="secondary" id="posterReset">Reset colors</button>
+          </div>
+        </div>
+        <div class="btnrow"><button class="primary" id="downloadPosterize" disabled>Download PNG</button></div>
+      </div>
+      <div class="preview-wrap"><canvas id="posterizeCanvas"></canvas></div>
+    </section>
+
+    <!-- PIXEL SHIFT -->
+    <section class="tab-panel" id="panel-shift" style="display:none;">
+      <div class="panel-title">Pixel shift</div>
+      <p class="panel-sub">Slice the image into horizontal or vertical bands and displace them for a glitch effect.</p>
+      <div class="card">
+        <div class="row">
+          <label class="checkline"><input type="radio" name="shiftAxis" value="row" checked> Shift rows</label>
+          <label class="checkline"><input type="radio" name="shiftAxis" value="col"> Shift columns</label>
+        </div>
+        <div class="row" style="margin-top:14px;">
+          <div class="field"><label>Pixels per band</label><input type="number" id="shiftBand" value="10" min="1"></div>
+          <div class="field"><label>Max shift (px)</label><input type="number" id="shiftAmt" value="40" min="0"></div>
+          <label class="checkline"><input type="checkbox" id="shiftRandom" checked> Randomize per band</label>
+          <label class="checkline"><input type="checkbox" id="shiftWrap" checked> Wrap edges</label>
+        </div>
+        <div class="btnrow">
+          <button class="primary" id="applyShiftBtn">Shift</button>
+          <button class="secondary" id="resetShiftBtn">Reset</button>
+          <button class="primary" id="downloadShift">Download PNG</button>
+        </div>
+      </div>
+      <div class="preview-wrap"><canvas id="shiftCanvas"></canvas></div>
+    </section>
+
+    <!-- BITMAP -->
+    <section class="tab-panel" id="panel-bitmap" style="display:none;">
+      <div class="panel-title">Bitmap export</div>
+      <p class="panel-sub">Export as a real .bmp file, in color or dithered black &amp; white.</p>
+      <div class="card">
+        <div class="row">
+          <button class="secondary" id="bmpModeColor">Color bitmap</button>
+          <button class="secondary" id="bmpModeMono">Black and white</button>
+        </div>
+        <div id="bmpMonoControls" style="display:none; margin-top:14px;">
+          <div class="row">
+            <div class="field" style="width:220px;">
+              <label>Threshold <span id="bmpThreshVal">128</span></label>
+              <input type="range" id="bmpThresh" min="0" max="255" value="128">
+            </div>
+            <label class="checkline"><input type="checkbox" id="bmpDither" checked> Use dithering</label>
+          </div>
+        </div>
+        <div class="btnrow"><button class="primary" id="downloadBitmap">Download .bmp</button></div>
+        <div class="status-msg" id="bmpStatus"></div>
+      </div>
+      <div class="preview-wrap"><canvas id="bitmapCanvas"></canvas></div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+/* =========================================================================
+   Shared state & helpers
+   ========================================================================= */
+const clamp = v => v < 0 ? 0 : v > 255 ? 255 : v;
+const $ = id => document.getElementById(id);
+
+function hexToRgb(hex) {
+  const h = hex.replace('#', '');
+  return { r: parseInt(h.substring(0,2),16), g: parseInt(h.substring(2,4),16), b: parseInt(h.substring(4,6),16) };
+}
+function rgbToHex(r,g,b){ return '#' + [r,g,b].map(v => v.toString(16).padStart(2,'0')).join(''); }
+function isValidHex(hex){ return /^#[0-9A-Fa-f]{6}$/.test(hex); }
+
+function downloadCanvasPNG(canvas, filename) {
+  const link = document.createElement('a');
+  link.download = filename;
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+}
+
+let sourceImage = null;      // original loaded Image, never mutated
+let workingCanvas = document.createElement('canvas'); // current base (after crop/resize)
+let workingCtx = workingCanvas.getContext('2d');
+
+const PREVIEW_MAX = 900; // cap for on-screen preview canvases (perf)
+
+function setWorkingFromImage(img) {
+  workingCanvas.width = img.naturalWidth;
+  workingCanvas.height = img.naturalHeight;
+  workingCtx.drawImage(img, 0, 0);
+}
+
+function scaledDims(w, h, maxDim) {
+  if (w <= maxDim && h <= maxDim) return { w, h };
+  const scale = maxDim / Math.max(w, h);
+  return { w: Math.round(w * scale), h: Math.round(h * scale) };
+}
+
+/* =========================================================================
+   Navigation
+   ========================================================================= */
+const stepButtons = document.querySelectorAll('.step-btn');
+const panels = document.querySelectorAll('.tab-panel');
+
+function enableSteps() {
+  stepButtons.forEach(b => b.disabled = false);
+  $('emptyState').style.display = 'none';
+  $('resetAllBtn').style.display = 'inline-block';
+}
+
+function goToStep(step) {
+  stepButtons.forEach(b => b.classList.toggle('active', b.dataset.step === step));
+  panels.forEach(p => p.style.display = (p.id === 'panel-' + step) ? 'block' : 'none');
+  refreshStep(step);
+}
+
+stepButtons.forEach(btn => {
+  btn.addEventListener('click', () => { if (!btn.disabled) goToStep(btn.dataset.step); });
+});
+
+function refreshStep(step) {
+  if (!sourceImage) return;
+  if (step === 'crop') { /* already initialized on load */ }
+  else if (step === 'adjust') renderAdjust();
+  else if (step === 'duotone') { setupDuotone(); }
+  else if (step === 'posterize') { setupPosterize(); }
+  else if (step === 'shift') { setupShift(); }
+  else if (step === 'bitmap') { setupBitmap(); }
+}
+
+/* =========================================================================
+   Upload
+   ========================================================================= */
+const fileInput = $('fileInput');
+const drop = $('drop');
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('drag'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+drop.addEventListener('drop', e => {
+  e.preventDefault(); drop.classList.remove('drag');
+  if (e.dataTransfer.files && e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+
+function loadFile(file) {
+  if (!file.type.startsWith('image/')) return;
+  $('fname').textContent = file.name;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const img = new Image();
+    img.onload = () => {
+      sourceImage = img;
+      setWorkingFromImage(img);
+      enableSteps();
+      setupCropStage();
+      goToStep('crop');
+    };
+    img.src = ev.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+$('resetAllBtn').addEventListener('click', () => {
+  if (!sourceImage) return;
+  setWorkingFromImage(sourceImage);
+  setupCropStage();
+  goToStep('crop');
+});
+
+/* =========================================================================
+   CROP & RESIZE  (ported from cropper.html + enlarger.html)
+   ========================================================================= */
+const cropCanvas = $('cropCanvas');
+const cropCtx = cropCanvas.getContext('2d');
+const cropbox = $('cropbox');
+const cropDims = $('cropDims');
+
+let cropScale = 1, cropDispW = 0, cropDispH = 0;
+let cropRatio = null;
+let box = { x:0, y:0, w:0, h:0 };
+const CROP_MAX_W = 640, CROP_MAX_H = 480, MIN_SIZE = 20;
+
+function setupCropStage() {
+  const srcW = workingCanvas.width, srcH = workingCanvas.height;
+  cropScale = Math.min(CROP_MAX_W / srcW, CROP_MAX_H / srcH, 1);
+  cropDispW = Math.round(srcW * cropScale);
+  cropDispH = Math.round(srcH * cropScale);
+  cropCanvas.width = cropDispW;
+  cropCanvas.height = cropDispH;
+  cropCtx.drawImage(workingCanvas, 0, 0, cropDispW, cropDispH);
+
+  const w = cropDispW * 0.8, h = cropDispH * 0.8;
+  box = { x: (cropDispW - w) / 2, y: (cropDispH - h) / 2, w, h };
+  clampBox();
+  renderBox();
+}
+
+document.querySelectorAll('#panel-crop button[data-ratio]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const val = btn.dataset.ratio;
+    cropRatio = val === 'free' ? null : (() => { const [w,h] = val.split(':').map(Number); return {w,h}; })();
+    if (cropRatio && cropDispW) fitRatio();
+  });
+});
+$('applyCustomRatio').addEventListener('click', () => {
+  const w = parseFloat($('ratioW').value), h = parseFloat($('ratioH').value);
+  if (w > 0 && h > 0) { cropRatio = {w,h}; if (cropDispW) fitRatio(); }
+});
+
+function fitRatio() {
+  const cx = box.x + box.w/2, cy = box.y + box.h/2;
+  const target = cropRatio.w / cropRatio.h;
+  let w = box.w, h = w / target;
+  if (h > cropDispH) { h = cropDispH; w = h * target; }
+  if (w > cropDispW) { w = cropDispW; h = w / target; }
+  box.w = w; box.h = h; box.x = cx - w/2; box.y = cy - h/2;
+  clampBox(); renderBox();
+}
+function clampBox() {
+  box.w = Math.max(MIN_SIZE, Math.min(box.w, cropDispW));
+  box.h = Math.max(MIN_SIZE, Math.min(box.h, cropDispH));
+  box.x = Math.max(0, Math.min(box.x, cropDispW - box.w));
+  box.y = Math.max(0, Math.min(box.y, cropDispH - box.h));
+}
+function renderBox() {
+  cropbox.style.left = box.x + 'px'; cropbox.style.top = box.y + 'px';
+  cropbox.style.width = box.w + 'px'; cropbox.style.height = box.h + 'px';
+  const realW = Math.round(box.w / cropScale), realH = Math.round(box.h / cropScale);
+  cropDims.textContent = realW + ' x ' + realH + ' px selection';
+  // Keep the resize fields in sync with the current crop selection so
+  // "Apply" defaults to the cropped aspect ratio instead of stretching it.
+  resizeW.value = realW;
+  resizeH.value = realH;
+}
+
+let dragMode = null, dragStart = null, boxStart = null;
+function beginDrag(m, e) {
+  dragMode = m; dragStart = { x: e.clientX, y: e.clientY }; boxStart = Object.assign({}, box);
+  e.preventDefault(); e.stopPropagation();
+  window.addEventListener('pointermove', onDrag);
+  window.addEventListener('pointerup', endDrag);
+}
+cropbox.addEventListener('pointerdown', e => { if (e.target === cropbox) beginDrag('move', e); });
+cropbox.querySelectorAll('.handle').forEach(h => h.addEventListener('pointerdown', e => beginDrag(h.dataset.handle, e)));
+
+function onDrag(e) {
+  if (!dragMode) return;
+  const dx = e.clientX - dragStart.x, dy = e.clientY - dragStart.y;
+  if (dragMode === 'move') {
+    box.x = boxStart.x + dx; box.y = boxStart.y + dy;
+  } else {
+    let { x, y, w, h } = boxStart;
+    let left = x, top = y, right = x + w, bottom = y + h;
+    if (dragMode.includes('n')) top = y + dy;
+    if (dragMode.includes('s')) bottom = y + h + dy;
+    if (dragMode.includes('w')) left = x + dx;
+    if (dragMode.includes('e')) right = x + w + dx;
+    let newW = right - left, newH = bottom - top;
+    if (cropRatio) {
+      const target = cropRatio.w / cropRatio.h;
+      if (Math.abs(dx) > Math.abs(dy)) newH = newW / target; else newW = newH * target;
+      if (dragMode === 'nw') { left = right - newW; top = bottom - newH; }
+      if (dragMode === 'ne') { right = left + newW; top = bottom - newH; }
+      if (dragMode === 'sw') { left = right - newW; bottom = top + newH; }
+      if (dragMode === 'se') { right = left + newW; bottom = top + newH; }
+    }
+    box.x = left; box.y = top;
+    box.w = Math.max(MIN_SIZE, right - left);
+    box.h = Math.max(MIN_SIZE, bottom - top);
+  }
+  clampBox(); renderBox();
+}
+function endDrag() {
+  dragMode = null;
+  window.removeEventListener('pointermove', onDrag);
+  window.removeEventListener('pointerup', endDrag);
+}
+
+const resizeW = $('resizeW'), resizeH = $('resizeH'), lockAspect = $('lockAspect'), fitMode = $('fitMode');
+resizeW.addEventListener('input', () => {
+  if (lockAspect.checked) {
+    const srcW = box.w / cropScale, srcH = box.h / cropScale;
+    resizeH.value = Math.round(resizeW.value * srcH / srcW);
+  }
+});
+resizeH.addEventListener('input', () => {
+  if (lockAspect.checked) {
+    const srcW = box.w / cropScale, srcH = box.h / cropScale;
+    resizeW.value = Math.round(resizeH.value * srcW / srcH);
+  }
+});
+
+function getCroppedCanvas() {
+  const sx = box.x / cropScale, sy = box.y / cropScale, sw = box.w / cropScale, sh = box.h / cropScale;
+  const out = document.createElement('canvas');
+  out.width = Math.round(sw); out.height = Math.round(sh);
+  out.getContext('2d').drawImage(workingCanvas, sx, sy, sw, sh, 0, 0, out.width, out.height);
+  return out;
+}
+
+function applyCropResize() {
+  const cropped = getCroppedCanvas();
+  const w = parseInt(resizeW.value) || cropped.width;
+  const h = parseInt(resizeH.value) || cropped.height;
+  const out = document.createElement('canvas');
+  out.width = w; out.height = h;
+  const octx = out.getContext('2d');
+  const mode = fitMode.value;
+  if (mode === 'stretch') {
+    octx.drawImage(cropped, 0, 0, w, h);
+  } else if (mode === 'fill') {
+    const scale = Math.max(w / cropped.width, h / cropped.height);
+    const dw = cropped.width * scale, dh = cropped.height * scale;
+    octx.drawImage(cropped, (w-dw)/2, (h-dh)/2, dw, dh);
+  } else {
+    const scale = Math.min(w / cropped.width, h / cropped.height);
+    const dw = cropped.width * scale, dh = cropped.height * scale;
+    octx.fillStyle = '#000'; octx.fillRect(0,0,w,h);
+    octx.drawImage(cropped, (w-dw)/2, (h-dh)/2, dw, dh);
+  }
+  workingCanvas = out;
+  workingCtx = out.getContext('2d');
+  setupCropStage();
+}
+
+$('applyCropResize').addEventListener('click', applyCropResize);
+$('skipToEffects').addEventListener('click', () => goToStep('adjust'));
+$('downloadCropBtn').addEventListener('click', () => downloadCanvasPNG(workingCanvas, 'cropped-resized.png'));
+
+/* =========================================================================
+   ADJUST / CUTOUT  (ported from contrast.html)
+   ========================================================================= */
+function renderAdjust() {
+  const dims = scaledDims(workingCanvas.width, workingCanvas.height, PREVIEW_MAX);
+  const canvas = $('adjustCanvas');
+  canvas.width = dims.w; canvas.height = dims.h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(workingCanvas, 0, 0, dims.w, dims.h);
+  const imageData = ctx.getImageData(0, 0, dims.w, dims.h);
+  const data = imageData.data;
+
+  const contrastAmt = parseInt($('adjContrast').value, 10);
+  const factor = (259 * (contrastAmt + 255)) / (255 * (259 - contrastAmt));
+  const doGray = $('adjGray').checked;
+  const doTransparent = $('adjTransparent').checked;
+  const threshold = parseInt($('adjThresh').value, 10);
+  const feather = parseInt($('adjFeather').value, 10) || 1;
+  const doForceBlack = $('adjForceBlack').checked;
+
+  for (let i = 0; i < data.length; i += 4) {
+    let r = data[i], g = data[i+1], b = data[i+2];
+    if (contrastAmt > 0) {
+      r = clamp((r-128)*factor+128); g = clamp((g-128)*factor+128); b = clamp((b-128)*factor+128);
+    }
+    if (doGray) { const lum = 0.299*r + 0.587*g + 0.114*b; r = g = b = lum; }
+    data[i]=r; data[i+1]=g; data[i+2]=b;
+    if (doTransparent) {
+      const brightness = (r+g+b)/3;
+      if (brightness >= threshold) data[i+3] = 0;
+      else if (brightness >= threshold - feather) data[i+3] = clamp(255 * (threshold - brightness) / feather);
+    }
+    if (doForceBlack) {
+      const isWhite = doTransparent ? data[i+3] === 0 : (r>=250 && g>=250 && b>=250);
+      if (!isWhite) { data[i]=0; data[i+1]=0; data[i+2]=0; }
+    }
+  }
+  ctx.putImageData(imageData, 0, 0);
+}
+['adjContrast','adjGray','adjTransparent','adjThresh','adjFeather','adjForceBlack'].forEach(id => {
+  $(id).addEventListener('input', () => {
+    if (id === 'adjContrast') $('adjContrastVal').textContent = $(id).value;
+    if (id === 'adjThresh') $('adjThreshVal').textContent = $(id).value;
+    if (id === 'adjFeather') $('adjFeatherVal').textContent = $(id).value;
+    renderAdjust();
+  });
+});
+$('downloadAdjust').addEventListener('click', () => downloadCanvasPNG($('adjustCanvas'), 'adjusted.png'));
+
+/* =========================================================================
+   DUOTONE  (ported from duotone.html)
+   ========================================================================= */
+let duoRaw = null; // {w,h,gray}
+
+function setupDuotone() {
+  const dims = scaledDims(workingCanvas.width, workingCanvas.height, 1400);
+  const canvas = $('duotoneCanvas');
+  canvas.width = dims.w; canvas.height = dims.h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(workingCanvas, 0, 0, dims.w, dims.h);
+  const imgData = ctx.getImageData(0, 0, dims.w, dims.h);
+  const data = imgData.data;
+  const gray = new Float32Array(dims.w * dims.h);
+  for (let i = 0; i < data.length; i += 4) {
+    gray[i/4] = (0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2]) / 255;
+  }
+  duoRaw = { w: dims.w, h: dims.h, gray };
+  renderDuotone();
+}
+
+function renderDuotone() {
+  if (!duoRaw) return;
+  const canvas = $('duotoneCanvas');
+  const ctx = canvas.getContext('2d');
+  const { w, h, gray } = duoRaw;
+  const c1 = hexToRgb($('duoColor1').value), c2 = hexToRgb($('duoColor2').value);
+  const mid = $('duoMid').value / 100;
+  const out = ctx.createImageData(w, h);
+  const od = out.data;
+  for (let i = 0; i < gray.length; i++) {
+    let t = gray[i];
+    if (mid !== 0.5) {
+      t = t < mid ? (t/mid)*0.5 : 0.5 + ((t-mid)/(1-mid))*0.5;
+    }
+    const idx = i*4;
+    od[idx] = c1.r + (c2.r-c1.r)*t;
+    od[idx+1] = c1.g + (c2.g-c1.g)*t;
+    od[idx+2] = c1.b + (c2.b-c1.b)*t;
+    od[idx+3] = 255;
+  }
+  ctx.putImageData(out, 0, 0);
+}
+$('duoColor1').addEventListener('input', () => { $('duoHex1').value = $('duoColor1').value; renderDuotone(); });
+$('duoColor2').addEventListener('input', () => { $('duoHex2').value = $('duoColor2').value; renderDuotone(); });
+$('duoHex1').addEventListener('change', () => { if (isValidHex($('duoHex1').value)) { $('duoColor1').value = $('duoHex1').value; renderDuotone(); } });
+$('duoHex2').addEventListener('change', () => { if (isValidHex($('duoHex2').value)) { $('duoColor2').value = $('duoHex2').value; renderDuotone(); } });
+$('duoSwap').addEventListener('click', () => {
+  const t = $('duoColor1').value; $('duoColor1').value = $('duoColor2').value; $('duoColor2').value = t;
+  $('duoHex1').value = $('duoColor1').value; $('duoHex2').value = $('duoColor2').value;
+  renderDuotone();
+});
+$('duoMid').addEventListener('input', () => { $('duoMidVal').textContent = $('duoMid').value + '%'; renderDuotone(); });
+$('downloadDuotone').addEventListener('click', () => downloadCanvasPNG($('duotoneCanvas'), 'duotone.png'));
+
+/* =========================================================================
+   POSTERIZE  (ported from posterizer.html)
+   ========================================================================= */
+let posterBase = null; // ImageData, posterized, never mutated after creation
+let posterPalette = []; // [{key,r,g,b}]
+let posterColorMap = {}; // key -> [r,g,b]
+
+function setupPosterize() {
+  const dims = scaledDims(workingCanvas.width, workingCanvas.height, 900);
+  const canvas = $('posterizeCanvas');
+  canvas.width = dims.w; canvas.height = dims.h;
+  canvas.getContext('2d').drawImage(workingCanvas, 0, 0, dims.w, dims.h);
+  $('posterPaletteWrap').style.display = 'none';
+  $('downloadPosterize').disabled = true;
+  posterBase = null;
+}
+$('posterLevels').addEventListener('input', () => $('posterLevelsVal').textContent = $('posterLevels').value);
+
+function posterizeChannel(value, levels) {
+  const step = 255 / (levels - 1);
+  return Math.round(Math.round(value / step) * step);
+}
+function applyPosterize() {
+  const canvas = $('posterizeCanvas');
+  const ctx = canvas.getContext('2d');
+  const levels = parseInt($('posterLevels').value, 10);
+  ctx.drawImage(workingCanvas, 0, 0, canvas.width, canvas.height);
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imgData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = posterizeChannel(data[i], levels);
+    data[i+1] = posterizeChannel(data[i+1], levels);
+    data[i+2] = posterizeChannel(data[i+2], levels);
+  }
+  ctx.putImageData(imgData, 0, 0);
+  posterBase = imgData;
+  buildPosterPalette(imgData);
+  $('downloadPosterize').disabled = false;
+}
+function buildPosterPalette(imgData) {
+  const data = imgData.data;
+  const counts = {};
+  for (let i = 0; i < data.length; i += 4) {
+    const key = data[i]+','+data[i+1]+','+data[i+2];
+    counts[key] = (counts[key]||0) + 1;
+  }
+  const top = Object.keys(counts).sort((a,b) => counts[b]-counts[a]).slice(0, 12);
+  posterPalette = top.map(key => { const [r,g,b] = key.split(',').map(Number); return {key,r,g,b}; });
+  posterColorMap = {};
+  posterPalette.forEach(c => posterColorMap[c.key] = [c.r,c.g,c.b]);
+  renderPosterSwatches();
+  $('posterPaletteWrap').style.display = 'block';
+}
+function renderPosterSwatches() {
+  const wrap = $('posterSwatches');
+  wrap.innerHTML = '';
+  posterPalette.forEach(c => {
+    const input = document.createElement('input');
+    input.type = 'color';
+    const cur = posterColorMap[c.key];
+    input.value = rgbToHex(cur[0], cur[1], cur[2]);
+    input.addEventListener('input', () => { posterColorMap[c.key] = hexToRgb(input.value); redrawPosterFromMap(); });
+    wrap.appendChild(input);
+  });
+}
+function redrawPosterFromMap() {
+  if (!posterBase) return;
+  const canvas = $('posterizeCanvas');
+  const ctx = canvas.getContext('2d');
+  const src = posterBase.data;
+  const out = ctx.createImageData(canvas.width, canvas.height);
+  const dst = out.data;
+  for (let i = 0; i < src.length; i += 4) {
+    const key = src[i]+','+src[i+1]+','+src[i+2];
+    const mapped = posterColorMap[key];
+    if (mapped) { dst[i]=mapped[0]; dst[i+1]=mapped[1]; dst[i+2]=mapped[2]; }
+    else { dst[i]=src[i]; dst[i+1]=src[i+1]; dst[i+2]=src[i+2]; }
+    dst[i+3] = src[i+3];
+  }
+  ctx.putImageData(out, 0, 0);
+}
+function shuffleArray(arr) {
+  const a = arr.slice();
+  for (let i = a.length-1; i>0; i--) { const j = Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; }
+  return a;
+}
+$('posterShuffle').addEventListener('click', () => {
+  if (posterPalette.length < 2) return;
+  const values = posterPalette.map(c => posterColorMap[c.key]);
+  const shuffled = shuffleArray(values);
+  posterPalette.forEach((c, idx) => posterColorMap[c.key] = shuffled[idx]);
+  renderPosterSwatches(); redrawPosterFromMap();
+});
+$('posterReset').addEventListener('click', () => {
+  posterPalette.forEach(c => posterColorMap[c.key] = [c.r,c.g,c.b]);
+  renderPosterSwatches(); redrawPosterFromMap();
+});
+$('applyPosterize').addEventListener('click', applyPosterize);
+$('downloadPosterize').addEventListener('click', () => downloadCanvasPNG($('posterizeCanvas'), 'posterized.png'));
+
+/* =========================================================================
+   PIXEL SHIFT  (ported from shifter.html)
+   ========================================================================= */
+let shiftOriginal = null, shiftCurrent = null;
+function setupShift() {
+  const dims = scaledDims(workingCanvas.width, workingCanvas.height, PREVIEW_MAX);
+  const canvas = $('shiftCanvas');
+  canvas.width = dims.w; canvas.height = dims.h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(workingCanvas, 0, 0, dims.w, dims.h);
+  shiftOriginal = ctx.getImageData(0, 0, dims.w, dims.h);
+  shiftCurrent = ctx.getImageData(0, 0, dims.w, dims.h);
+}
+function applyShift() {
+  if (!shiftCurrent) return;
+  const canvas = $('shiftCanvas');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  const src = shiftCurrent.data;
+  const out = ctx.createImageData(w, h);
+  const dst = out.data;
+  const axis = document.querySelector('input[name="shiftAxis"]:checked').value;
+  const band = Math.max(1, parseInt($('shiftBand').value) || 1);
+  const maxShift = parseInt($('shiftAmt').value) || 0;
+  const randomize = $('shiftRandom').checked;
+  const wrap = $('shiftWrap').checked;
+  function offsetForBand() {
+    if (maxShift === 0) return 0;
+    if (!randomize) return maxShift;
+    return Math.floor(Math.random() * (maxShift*2+1)) - maxShift;
+  }
+  if (axis === 'row') {
+    let offset = 0;
+    for (let y = 0; y < h; y++) {
+      if (y % band === 0) offset = offsetForBand();
+      for (let x = 0; x < w; x++) {
+        let sx = x - offset;
+        if (wrap) sx = ((sx % w) + w) % w;
+        const di = (y*w+x)*4;
+        if (sx < 0 || sx >= w) { dst[di]=0; dst[di+1]=0; dst[di+2]=0; dst[di+3]=255; }
+        else { const si=(y*w+sx)*4; dst[di]=src[si]; dst[di+1]=src[si+1]; dst[di+2]=src[si+2]; dst[di+3]=src[si+3]; }
+      }
+    }
+  } else {
+    let offset = 0;
+    for (let x = 0; x < w; x++) {
+      if (x % band === 0) offset = offsetForBand();
+      for (let y = 0; y < h; y++) {
+        let sy = y - offset;
+        if (wrap) sy = ((sy % h) + h) % h;
+        const di = (y*w+x)*4;
+        if (sy < 0 || sy >= h) { dst[di]=0; dst[di+1]=0; dst[di+2]=0; dst[di+3]=255; }
+        else { const si=(sy*w+x)*4; dst[di]=src[si]; dst[di+1]=src[si+1]; dst[di+2]=src[si+2]; dst[di+3]=src[si+3]; }
+      }
+    }
+  }
+  ctx.putImageData(out, 0, 0);
+  shiftCurrent = out;
+}
+$('applyShiftBtn').addEventListener('click', applyShift);
+$('resetShiftBtn').addEventListener('click', () => {
+  if (!shiftOriginal) return;
+  const canvas = $('shiftCanvas');
+  const ctx = canvas.getContext('2d');
+  shiftCurrent = new ImageData(new Uint8ClampedArray(shiftOriginal.data), shiftOriginal.width, shiftOriginal.height);
+  ctx.putImageData(shiftCurrent, 0, 0);
+});
+$('downloadShift').addEventListener('click', () => downloadCanvasPNG($('shiftCanvas'), 'pixel-shift.png'));
+
+/* =========================================================================
+   BITMAP EXPORT  (ported from bitmap.html)
+   ========================================================================= */
+let bmpMode = 'color';
+const BMP_MAX_DIM = 500;
+
+function setupBitmap() {
+  const dims = scaledDims(workingCanvas.width, workingCanvas.height, BMP_MAX_DIM);
+  const canvas = $('bitmapCanvas');
+  canvas.width = dims.w; canvas.height = dims.h;
+  setBmpMode(bmpMode);
+}
+function setBmpMode(m) {
+  bmpMode = m;
+  $('bmpModeColor').style.borderColor = m === 'color' ? 'var(--accent)' : '';
+  $('bmpModeMono').style.borderColor = m === 'mono' ? 'var(--accent)' : '';
+  $('bmpMonoControls').style.display = m === 'mono' ? 'block' : 'none';
+  renderBitmap();
+}
+function renderBitmap() {
+  const canvas = $('bitmapCanvas');
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(workingCanvas, 0, 0, canvas.width, canvas.height);
+  if (bmpMode === 'mono') applyMono();
+}
+function applyMono() {
+  const canvas = $('bitmapCanvas');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  const imgData = ctx.getImageData(0, 0, w, h);
+  const data = imgData.data;
+  const gray = new Float32Array(w*h);
+  for (let i = 0; i < w*h; i++) gray[i] = 0.299*data[i*4] + 0.587*data[i*4+1] + 0.114*data[i*4+2];
+  const threshold = parseInt($('bmpThresh').value, 10);
+  const useDither = $('bmpDither').checked;
+  if (useDither) {
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y*w+x;
+        const old = gray[i];
+        const val = old < threshold ? 0 : 255;
+        const err = old - val;
+        gray[i] = val;
+        if (x+1 < w) gray[i+1] += err*7/16;
+        if (y+1 < h) {
+          if (x>0) gray[i+w-1] += err*3/16;
+          gray[i+w] += err*5/16;
+          if (x+1<w) gray[i+w+1] += err*1/16;
+        }
+      }
+    }
+  } else {
+    for (let i = 0; i < w*h; i++) gray[i] = gray[i] < threshold ? 0 : 255;
+  }
+  for (let i = 0; i < w*h; i++) {
+    const v = gray[i] < 128 ? 0 : 255;
+    data[i*4]=v; data[i*4+1]=v; data[i*4+2]=v; data[i*4+3]=255;
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+$('bmpModeColor').addEventListener('click', () => setBmpMode('color'));
+$('bmpModeMono').addEventListener('click', () => setBmpMode('mono'));
+$('bmpThresh').addEventListener('input', () => { $('bmpThreshVal').textContent = $('bmpThresh').value; renderBitmap(); });
+$('bmpDither').addEventListener('change', renderBitmap);
+
+function encodeBMP24(w, h, pixelData) {
+  const rowSize = Math.floor((24*w+31)/32)*4;
+  const pixelArraySize = rowSize*h;
+  const fileSize = 54 + pixelArraySize;
+  const buffer = new ArrayBuffer(fileSize);
+  const view = new DataView(buffer);
+  view.setUint8(0,0x42); view.setUint8(1,0x4D);
+  view.setUint32(2,fileSize,true); view.setUint32(6,0,true); view.setUint32(10,54,true);
+  view.setUint32(14,40,true); view.setInt32(18,w,true); view.setInt32(22,h,true);
+  view.setUint16(26,1,true); view.setUint16(28,24,true); view.setUint32(30,0,true);
+  view.setUint32(34,pixelArraySize,true); view.setInt32(38,2835,true); view.setInt32(42,2835,true);
+  view.setUint32(46,0,true); view.setUint32(50,0,true);
+  let offset = 54;
+  for (let y = h-1; y >= 0; y--) {
+    for (let x = 0; x < w; x++) {
+      const i = (y*w+x)*4;
+      view.setUint8(offset++, pixelData[i+2]); view.setUint8(offset++, pixelData[i+1]); view.setUint8(offset++, pixelData[i]);
+    }
+    const pad = rowSize - w*3;
+    for (let p = 0; p < pad; p++) view.setUint8(offset++, 0);
+  }
+  return buffer;
+}
+function encodeBMP1(w, h, pixelData) {
+  const rowSize = Math.floor((w+31)/32)*4;
+  const pixelArraySize = rowSize*h;
+  const headerSize = 62;
+  const fileSize = headerSize + pixelArraySize;
+  const buffer = new ArrayBuffer(fileSize);
+  const view = new DataView(buffer);
+  view.setUint8(0,0x42); view.setUint8(1,0x4D);
+  view.setUint32(2,fileSize,true); view.setUint32(6,0,true); view.setUint32(10,headerSize,true);
+  view.setUint32(14,40,true); view.setInt32(18,w,true); view.setInt32(22,h,true);
+  view.setUint16(26,1,true); view.setUint16(28,1,true); view.setUint32(30,0,true);
+  view.setUint32(34,pixelArraySize,true); view.setInt32(38,2835,true); view.setInt32(42,2835,true);
+  view.setUint32(46,2,true); view.setUint32(50,2,true);
+  let offset = 54;
+  view.setUint8(offset++,0); view.setUint8(offset++,0); view.setUint8(offset++,0); view.setUint8(offset++,0);
+  view.setUint8(offset++,255); view.setUint8(offset++,255); view.setUint8(offset++,255); view.setUint8(offset++,0);
+  for (let y = h-1; y >= 0; y--) {
+    let bitBuf = 0, bitCount = 0;
+    const rowStart = offset;
+    for (let x = 0; x < w; x++) {
+      const i = (y*w+x)*4;
+      const isWhite = pixelData[i] >= 128 ? 1 : 0;
+      bitBuf = (bitBuf<<1)|isWhite; bitCount++;
+      if (bitCount === 8) { view.setUint8(offset++, bitBuf); bitBuf=0; bitCount=0; }
+    }
+    if (bitCount > 0) { bitBuf = bitBuf << (8-bitCount); view.setUint8(offset++, bitBuf); }
+    const written = offset - rowStart;
+    for (let p = 0; p < rowSize - written; p++) view.setUint8(offset++, 0);
+  }
+  return buffer;
+}
+$('downloadBitmap').addEventListener('click', () => {
+  const canvas = $('bitmapCanvas');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  const imgData = ctx.getImageData(0, 0, w, h).data;
+  const buffer = bmpMode === 'mono' ? encodeBMP1(w, h, imgData) : encodeBMP24(w, h, imgData);
+  const blob = new Blob([buffer], { type: 'image/bmp' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'converted.bmp';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  $('bmpStatus').textContent = 'Downloaded as converted.bmp';
+  setTimeout(() => $('bmpStatus').textContent = '', 4000);
+});
+
+</script>
+</body>
+</html>

@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Print Shop</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<style>
+  :root {
+    --bg: #16161a;
+    --panel: #1f1f24;
+    --panel-2: #131316;
+    --border: #2e2e35;
+    --border-strong: #3d3d46;
+    --text: #f2f2f0;
+    --muted: #9a9aa2;
+    --accent: #e8e6df;
+    --accent-dim: #b9b7ae;
+    --warn-bg: rgba(226, 179, 79, 0.12);
+    --warn-ink: #e2b34f;
+    --err-bg: rgba(226, 115, 79, 0.12);
+    --err-ink: #e2734f;
+    --ok-bg: rgba(143, 209, 158, 0.12);
+    --ok-ink: #8fd19e;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 30px 20px 60px; }
+  .brand { margin-bottom: 20px; }
+  .brand .name { font-size: 1.2rem; font-weight: 700; }
+  .brand .tag { font-size: 0.85rem; color: var(--muted); margin-top: 2px; }
+
+  .tabs { display: flex; gap: 6px; margin-bottom: 20px; border-bottom: 1px solid var(--border); }
+  .tabs button {
+    background: none; border: none; color: var(--muted); font-family: inherit;
+    font-size: 0.9rem; padding: 10px 4px; margin-right: 22px; cursor: pointer; position: relative;
+  }
+  .tabs button.active { color: var(--text); font-weight: 600; }
+  .tabs button.active::after {
+    content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--accent);
+  }
+
+  .subtabs { display: flex; gap: 8px; margin-bottom: 18px; }
+  .subtabs button {
+    background: var(--panel-2); border: 1px solid var(--border-strong); color: var(--muted);
+    border-radius: 20px; padding: 6px 14px; font-size: 0.8rem; cursor: pointer; font-family: inherit;
+  }
+  .subtabs button.active { background: var(--accent); color: #16161a; font-weight: 600; border-color: var(--accent); }
+
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; margin-bottom: 18px;
+  }
+  .card h3 { margin: 0 0 14px; font-size: 0.92rem; display: flex; align-items: center; gap: 10px; }
+  .step-num {
+    display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+    border-radius: 5px; background: var(--panel-2); border: 1px solid var(--border-strong);
+    font-size: 0.72rem; font-weight: 700; color: var(--accent-dim); flex-shrink: 0;
+  }
+  .card .hint { font-size: 0.78rem; color: var(--muted); font-weight: 400; margin-left: auto; }
+
+  .drop {
+    border: 1.5px dashed var(--border-strong); border-radius: var(--radius);
+    padding: 24px 14px; text-align: center; cursor: pointer; color: var(--muted);
+    font-size: 0.86rem; transition: border-color .15s, color .15s;
+  }
+  .drop:hover, .drop.drag { border-color: var(--accent); color: var(--text); }
+  .drop .sub { font-size: 0.76rem; color: var(--muted); margin-top: 4px; }
+  input[type=file] { display: none; }
+
+  .slot-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .pair-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 4px; }
+  @media (max-width: 560px) { .slot-grid, .pair-grid { grid-template-columns: 1fr; } }
+  .slot { position: relative; }
+  .slot input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+  .slot-box {
+    border: 1.5px dashed var(--border-strong); border-radius: 8px; padding: 14px 10px; text-align: center;
+    min-height: 70px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+    background: var(--panel-2); transition: border-color .15s, background .15s;
+  }
+  .slot:hover .slot-box { border-color: var(--accent); }
+  .slot-box.has-file { border-style: solid; border-color: var(--ok-ink); background: rgba(143,209,158,0.06); }
+  .slot-name { font-size: 0.72rem; letter-spacing: 0.03em; text-transform: uppercase; color: var(--muted); }
+  .slot-file { font-size: 0.76rem; color: var(--ok-ink); word-break: break-all; max-width: 100%; }
+  .slot-empty { font-size: 0.72rem; color: var(--muted); opacity: 0.7; }
+
+  .order-row { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  .order-btn {
+    flex: 1; min-width: 190px; text-align: left; font-family: inherit; font-size: 0.8rem;
+    padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 8px;
+    background: var(--panel-2); color: var(--text); cursor: pointer;
+  }
+  .order-btn b { display: block; font-size: 0.76rem; color: var(--accent-dim); margin-bottom: 2px; }
+  .order-btn.active { border-color: var(--accent); background: rgba(232,230,223,0.08); }
+
+  .filelist { margin-top: 14px; display: flex; flex-direction: column; gap: 7px; }
+  .file-row {
+    display: flex; align-items: center; gap: 9px; padding: 8px 9px; border: 1px solid var(--border);
+    border-radius: 7px; background: var(--panel-2); font-size: 0.82rem; cursor: grab;
+    transition: border-color .12s, opacity .12s;
+  }
+  .file-row.dragging { opacity: 0.4; cursor: grabbing; }
+  .file-row.drag-over { border-color: var(--accent); }
+  .file-handle { color: var(--muted); font-size: 13px; user-select: none; flex-shrink: 0; }
+  .file-order {
+    font-weight: 700; font-size: 0.7rem; color: #16161a; background: var(--accent-dim);
+    width: 20px; height: 20px; border-radius: 5px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .file-name { flex: 1; word-break: break-all; }
+  .file-moves { display: flex; flex-direction: column; gap: 1px; flex-shrink: 0; }
+  .file-move { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 9px; padding: 1px 4px; }
+  .file-move:hover:not(:disabled) { color: var(--text); }
+  .file-move:disabled { opacity: 0.25; cursor: default; }
+  .file-remove { background: none; border: none; color: var(--err-ink); cursor: pointer; font-size: 14px; padding: 0 3px; flex-shrink: 0; }
+  .filelist-note { font-size: 0.74rem; color: var(--muted); margin-top: 10px; }
+
+  .assemble-actions { display: flex; flex-direction: column; align-items: center; gap: 12px; margin-top: 20px; }
+  button.action {
+    font-size: 0.86rem; font-weight: 600; padding: 11px 28px; border-radius: 8px; cursor: pointer;
+    border: none; background: var(--accent); color: #16161a; font-family: inherit;
+  }
+  button.action:hover:not(:disabled) { opacity: 0.88; }
+  button.action:disabled { opacity: 0.35; cursor: not-allowed; }
+  button.link-btn {
+    background: none; border: none; color: var(--accent-dim); font-size: 0.78rem; cursor: pointer;
+    text-decoration: underline; text-underline-offset: 2px; font-family: inherit; margin-top: 2px;
+  }
+  .status-line { font-size: 0.8rem; color: var(--muted); text-align: center; min-height: 1.2em; }
+  .status-line.success { color: var(--ok-ink); font-weight: 600; }
+  .status-line.error { color: var(--err-ink); font-weight: 600; }
+  .progress-track {
+    width: 100%; max-width: 300px; height: 5px; border-radius: 3px; background: var(--panel-2);
+    overflow: hidden; display: none;
+  }
+  .progress-track.show { display: block; }
+  .progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width .2s ease; }
+  .downloads { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .download-link {
+    display: none; align-items: center; gap: 8px; font-size: 0.82rem; color: var(--ok-ink);
+    text-decoration: none; border-bottom: 1px solid var(--ok-ink); padding-bottom: 1px; font-weight: 600;
+  }
+  .download-link.show { display: inline-flex; }
+  .download-link.secondary { color: var(--accent-dim); border-bottom-color: var(--accent-dim); }
+  .continue-box {
+    display: none; margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border);
+    text-align: center; width: 100%;
+  }
+  .continue-box.show { display: block; }
+
+  /* impose tab */
+  .diagram { text-align: center; color: var(--muted); font-size: 0.78rem; margin-bottom: 4px; }
+  .field { margin-bottom: 16px; }
+  .field:last-child { margin-bottom: 0; }
+  .field-label { display: block; font-size: 0.8rem; font-weight: 600; margin-bottom: 6px; }
+  .field-help { font-size: 0.76rem; color: var(--muted); margin-top: 5px; line-height: 1.4; }
+  .stepper { display: flex; align-items: center; width: fit-content; border: 1px solid var(--border-strong); border-radius: 8px; overflow: hidden; }
+  .stepper button { width: 32px; height: 32px; background: var(--panel-2); border: none; font-size: 15px; cursor: pointer; color: var(--text); }
+  .stepper button:hover { background: var(--border); }
+  .stepper input {
+    width: 54px; height: 32px; text-align: center; border: none; border-left: 1px solid var(--border-strong);
+    border-right: 1px solid var(--border-strong); font-family: ui-monospace, monospace; font-size: 0.86rem;
+    background: var(--bg); color: var(--text);
+  }
+  .stepper input:focus { outline: none; }
+  select {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 8px;
+    background: var(--panel-2); color: var(--text); font-size: 0.86rem; font-family: inherit;
+  }
+  .checkrow { display: flex; align-items: flex-start; gap: 8px; font-size: 0.82rem; cursor: pointer; }
+  .checkrow input { margin-top: 2px; }
+  .filename-box {
+    margin-top: 12px; font-family: ui-monospace, monospace; font-size: 0.78rem; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; display: none;
+    align-items: center; justify-content: space-between; gap: 10px;
+  }
+  .filename-box button { background: none; border: none; color: var(--err-ink); cursor: pointer; font-size: 0.74rem; font-family: inherit; text-decoration: underline; }
+  .ticket {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px;
+    font-family: ui-monospace, monospace; font-size: 0.8rem; line-height: 1.9; position: relative;
+  }
+  .ticket .stamp {
+    position: absolute; top: 12px; right: 14px; font-size: 0.68rem; letter-spacing: 0.08em;
+    color: var(--accent-dim); border: 1px solid var(--accent-dim); padding: 2px 7px; border-radius: 4px;
+    text-transform: uppercase;
+  }
+  .ticket .row { display: flex; justify-content: space-between; gap: 14px; }
+  .ticket .row span:first-child { color: var(--muted); }
+  .ticket .divider { border-top: 1px dashed var(--border); margin: 6px 0; }
+  .note { border-radius: 8px; padding: 10px 12px; font-size: 0.8rem; line-height: 1.5; margin-top: 12px; }
+  .note.warn { background: var(--warn-bg); color: var(--warn-ink); }
+  .note.err { background: var(--err-bg); color: var(--err-ink); }
+  .go-btn {
+    width: 100%; padding: 13px 16px; background: var(--accent); color: #16161a; border: none;
+    border-radius: 8px; font-size: 0.9rem; font-weight: 600; cursor: pointer; font-family: inherit;
+  }
+  .go-btn:hover:not(:disabled) { opacity: 0.88; }
+  .go-btn:disabled { background: var(--panel-2); color: var(--muted); cursor: not-allowed; }
+  .footnote { text-align: center; font-size: 0.76rem; color: var(--muted); margin-top: 16px; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <div class="brand">
+    <div class="name">Print Shop</div>
+    <div class="tag">Assemble a PDF from your pages, then impose it into printable signatures</div>
+  </div>
+
+  <div class="tabs">
+    <button class="active" data-tab="assemble">Assemble</button>
+    <button data-tab="impose">Impose</button>
+  </div>
+
+  <!-- ================= ASSEMBLE TAB ================= -->
+  <div class="panel active" id="tab-assemble">
+    <div class="subtabs">
+      <button class="active" data-sub="quick">Quick Merge</button>
+      <button data-sub="structured">Structured Bind</button>
+    </div>
+
+    <!-- QUICK MERGE -->
+    <div class="sub-panel active" id="sub-quick">
+      <div class="card">
+        <h3><span class="step-num">1</span> Drop your pages <span class="hint">sorted by number in filename</span></h3>
+        <div class="drop" id="quickDrop">
+          <input type="file" accept="application/pdf" multiple id="quickInput">
+          <div>Drop PDF files here, or click to choose</div>
+          <div class="sub">Any number of files — e.g. page_1.pdf, page_2.pdf, or 001_intro.pdf, 002_body.pdf</div>
+        </div>
+        <div class="filelist" id="quickFilelist"></div>
+        <p class="filelist-note" id="quickNote" style="display:none;">Sorted by the number found in each filename. Drag a row (or use the arrows) to reorder by hand — new files dropped in afterward are added to the end.</p>
+      </div>
+      <div class="card assemble-actions">
+        <button class="action" id="quickAssembleBtn" disabled>Merge in Order</button>
+        <div class="progress-track" id="quickProgressTrack"><div class="progress-fill" id="quickProgressFill"></div></div>
+        <p class="status-line" id="quickStatus">Awaiting files.</p>
+        <div class="downloads">
+          <a class="download-link" id="quickDownloadCombined" download="Combined.pdf"><span id="quickDownloadCombinedLabel">Download combined PDF</span></a>
+          <a class="download-link secondary" id="quickDownloadZip" download="Individual_Pages.zip"><span id="quickDownloadZipLabel">Download renumbered files (zip)</span></a>
+        </div>
+        <div class="continue-box" id="quickContinueBox">
+          <button class="link-btn" id="quickContinueBtn">Use this PDF for imposition &#8594;</button>
+        </div>
+        <button class="link-btn" id="quickResetBtn">Start over</button>
+      </div>
+    </div>
+
+    <!-- STRUCTURED BIND -->
+    <div class="sub-panel" id="sub-structured" style="display:none;">
+      <div class="card">
+        <h3><span class="step-num">1</span> Covers &amp; blank leaf <span class="hint">single PDFs, optional</span></h3>
+        <div class="slot-grid">
+          <div class="slot" id="slotCover">
+            <input type="file" accept="application/pdf" data-slot="cover">
+            <div class="slot-box"><span class="slot-name">Cover</span><span class="slot-empty">Drop or choose file</span></div>
+          </div>
+          <div class="slot" id="slotBlank">
+            <input type="file" accept="application/pdf" data-slot="blank">
+            <div class="slot-box"><span class="slot-name">Blank leaf</span><span class="slot-empty">Drop or choose file</span></div>
+          </div>
+          <div class="slot" id="slotBack">
+            <input type="file" accept="application/pdf" data-slot="back">
+            <div class="slot-box"><span class="slot-name">Back cover</span><span class="slot-empty">Drop or choose file</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3><span class="step-num">2</span> The two runs <span class="hint">.zip of numbered page PDFs</span></h3>
+        <div class="pair-grid">
+          <div class="slot" id="slotLeft">
+            <input type="file" accept=".zip,application/zip" data-slot="left">
+            <div class="slot-box"><span class="slot-name">Left run</span><span class="slot-empty">Drop or choose .zip</span></div>
+          </div>
+          <div class="slot" id="slotRight">
+            <input type="file" accept=".zip,application/zip" data-slot="right">
+            <div class="slot-box"><span class="slot-name">Right run</span><span class="slot-empty">Drop or choose .zip</span></div>
+          </div>
+        </div>
+        <div class="order-row" id="orderButtons">
+          <button type="button" class="order-btn active" data-order="left-first"><b>Left leads</b>Left 1 &#8594; Right 1 &#8594; Left 2 &#8594; Right 2 &hellip;</button>
+          <button type="button" class="order-btn" data-order="right-first"><b>Right leads</b>Right 1 &#8594; Left 1 &#8594; Right 2 &#8594; Left 2 &hellip;</button>
+        </div>
+      </div>
+
+      <div class="card assemble-actions">
+        <button class="action" id="structAssembleBtn" disabled>Assemble Structured PDF</button>
+        <div class="progress-track" id="structProgressTrack"><div class="progress-fill" id="structProgressFill"></div></div>
+        <p class="status-line" id="structStatus">Awaiting your two runs of pages.</p>
+        <div class="downloads">
+          <a class="download-link" id="structDownloadCombined" download="Combined.pdf"><span id="structDownloadCombinedLabel">Download combined PDF</span></a>
+          <a class="download-link secondary" id="structDownloadZip" download="Individual_Pages.zip"><span id="structDownloadZipLabel">Download individual pages (zip)</span></a>
+        </div>
+        <div class="continue-box" id="structContinueBox">
+          <button class="link-btn" id="structContinueBtn">Use this PDF for imposition &#8594;</button>
+        </div>
+        <button class="link-btn" id="structResetBtn">Start over</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= IMPOSE TAB ================= -->
+  <div class="panel" id="tab-impose">
+    <p class="diagram">Print duplex &#8594; cut in half &#8594; fold &amp; nest into a saddle-stitch signature</p>
+
+    <div class="card">
+      <h3><span class="step-num">1</span> Your file</h3>
+      <div class="drop" id="imposeDrop">
+        <input type="file" id="imposeFileInput" accept="application/pdf">
+        <div>Click to choose a PDF, or drop it here</div>
+        <div class="sub">Pages should already be in final reading order</div>
+      </div>
+      <div class="filename-box" id="imposeFilenameBox">
+        <span id="imposeFilenameText"></span>
+        <button id="imposeClearBtn">remove</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3><span class="step-num">2</span> Signature settings</h3>
+      <div class="field">
+        <label class="field-label">Pages per signature</label>
+        <div class="stepper">
+          <button type="button" id="sigDec">&minus;</button>
+          <input type="text" id="sigSize" value="8" inputmode="numeric">
+          <button type="button" id="sigInc">&plus;</button>
+        </div>
+        <p class="field-help">Must be a multiple of 4. 8 is the cleanest workflow — exactly one sheet of paper per signature.</p>
+      </div>
+      <div class="field">
+        <label class="field-label">Sheet size</label>
+        <select id="sheetSize">
+          <option value="letter" selected>Letter — 8.5 &times; 11 in</option>
+          <option value="a4">A4 — 210 &times; 297 mm</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="checkrow"><input type="checkbox" id="padBlank" checked><span>Pad with blank pages at the end if the page count doesn't divide evenly</span></label>
+      </div>
+      <div class="field">
+        <label class="checkrow"><input type="checkbox" id="showCutline" checked><span>Show dashed cut guide line</span></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3><span class="step-num">3</span> Job ticket</h3>
+      <div class="ticket" id="ticket">
+        <div class="stamp" id="stamp">no file yet</div>
+        <div class="row"><span>source pages</span><span id="tPages">&mdash;</span></div>
+        <div class="row"><span>blank pages added</span><span id="tPad">&mdash;</span></div>
+        <div class="divider"></div>
+        <div class="row"><span>signatures</span><span id="tSigs">&mdash;</span></div>
+        <div class="row"><span>sheets of paper</span><span id="tSheets">&mdash;</span></div>
+      </div>
+      <div id="imposeMessages"></div>
+    </div>
+
+    <button class="go-btn" id="imposeGoBtn" disabled>Choose a PDF to begin</button>
+    <p class="footnote">Runs entirely in your browser &mdash; nothing is uploaded anywhere.</p>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+/* =========================================================================
+   Top-level tab switching
+   ========================================================================= */
+document.querySelectorAll('.tabs button').forEach(btn => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+});
+function switchTab(name) {
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  $('tab-assemble').classList.toggle('active', name === 'assemble');
+  $('tab-impose').classList.toggle('active', name === 'impose');
+}
+
+document.querySelectorAll('.subtabs button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.subtabs button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    $('sub-quick').style.display = btn.dataset.sub === 'quick' ? 'block' : 'none';
+    $('sub-structured').style.display = btn.dataset.sub === 'structured' ? 'block' : 'none';
+  });
+});
+
+/* =========================================================================
+   Shared helpers (assemble side)
+   ========================================================================= */
+function naturalPageNumber(filename) {
+  const m = filename.match(/(\d+)(?!.*\d)/);
+  return m ? parseInt(m[1], 10) : null;
+}
+async function fileToBytes(file) { return new Uint8Array(await file.arrayBuffer()); }
+async function loadZipPages(file) {
+  const zip = await JSZip.loadAsync(file);
+  const entries = [];
+  zip.forEach((relPath, entry) => { if (!entry.dir && /\.pdf$/i.test(relPath)) entries.push(entry); });
+  entries.sort((a, b) => {
+    const na = naturalPageNumber(a.name), nb = naturalPageNumber(b.name);
+    if (na !== null && nb !== null) return na - nb;
+    return a.name.localeCompare(b.name);
+  });
+  const pages = [];
+  for (const entry of entries) pages.push(await entry.async('uint8array'));
+  return pages;
+}
+async function buildCombinedPdf(sequenceBytesList) {
+  const { PDFDocument } = PDFLib;
+  const outDoc = await PDFDocument.create();
+  for (const bytes of sequenceBytesList) {
+    const srcDoc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+    const copied = await outDoc.copyPages(srcDoc, srcDoc.getPageIndices());
+    copied.forEach(p => outDoc.addPage(p));
+  }
+  return outDoc.save();
+}
+async function buildZipOfIndividuals(namedFiles) {
+  const zip = new JSZip();
+  namedFiles.forEach(f => zip.file(f.name, f.bytes));
+  return zip.generateAsync({ type: 'blob' });
+}
+function setDownload(linkEl, blob, filename, labelEl, labelText) {
+  const url = URL.createObjectURL(blob);
+  linkEl.href = url; linkEl.download = filename; linkEl.classList.add('show');
+  if (labelEl) labelEl.textContent = labelText;
+}
+
+/* =========================================================================
+   QUICK MERGE  (ported from page_weaver.html)
+   ========================================================================= */
+(function () {
+  let files = [];
+  let manuallyOrdered = false;
+  let draggedIndex = null;
+  let lastCombinedBytes = null;
+
+  const dropzone = $('quickDrop'), input = $('quickInput'), filelistEl = $('quickFilelist'), note = $('quickNote');
+  const assembleBtn = $('quickAssembleBtn'), statusText = $('quickStatus');
+  const progressTrack = $('quickProgressTrack'), progressFill = $('quickProgressFill');
+  const downloadCombined = $('quickDownloadCombined'), downloadCombinedLabel = $('quickDownloadCombinedLabel');
+  const downloadZip = $('quickDownloadZip'), downloadZipLabel = $('quickDownloadZipLabel');
+  const resetBtn = $('quickResetBtn');
+  const continueBox = $('quickContinueBox'), continueBtn = $('quickContinueBtn');
+
+  function sortFiles(list) {
+    return [...list].sort((a, b) => {
+      const na = naturalPageNumber(a.name), nb = naturalPageNumber(b.name);
+      if (na !== null && nb !== null) return na - nb;
+      if (na !== null) return -1;
+      if (nb !== null) return 1;
+      return 0;
+    });
+  }
+  function moveFile(fromIdx, toIdx) {
+    if (fromIdx === toIdx || fromIdx < 0 || toIdx < 0 || fromIdx >= files.length || toIdx >= files.length) return;
+    const [moved] = files.splice(fromIdx, 1);
+    files.splice(toIdx, 0, moved);
+    manuallyOrdered = true;
+    renderList(); resetDownloads();
+  }
+  function renderList() {
+    filelistEl.innerHTML = '';
+    if (files.length === 0) { note.style.display = 'none'; assembleBtn.disabled = true; return; }
+    note.style.display = 'block'; assembleBtn.disabled = false;
+    files.forEach((f, idx) => {
+      const row = document.createElement('div');
+      row.className = 'file-row'; row.draggable = true; row.dataset.idx = String(idx);
+      row.innerHTML = `
+        <span class="file-handle">&#8942;&#8942;</span>
+        <span class="file-order">${idx + 1}</span>
+        <span class="file-name">${f.name}</span>
+        <span class="file-moves">
+          <button class="file-move" data-dir="up" data-idx="${idx}" title="Move up" ${idx === 0 ? 'disabled' : ''}>&#9650;</button>
+          <button class="file-move" data-dir="down" data-idx="${idx}" title="Move down" ${idx === files.length - 1 ? 'disabled' : ''}>&#9660;</button>
+        </span>
+        <button class="file-remove" data-idx="${idx}" title="Remove">&#10005;</button>`;
+      row.addEventListener('dragstart', e => { draggedIndex = idx; row.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(idx)); });
+      row.addEventListener('dragend', () => { row.classList.remove('dragging'); filelistEl.querySelectorAll('.file-row').forEach(r => r.classList.remove('drag-over')); draggedIndex = null; });
+      row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; row.classList.add('drag-over'); });
+      row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
+      row.addEventListener('drop', e => {
+        e.preventDefault(); row.classList.remove('drag-over');
+        const fromIdx = draggedIndex !== null ? draggedIndex : parseInt(e.dataTransfer.getData('text/plain'), 10);
+        moveFile(fromIdx, idx);
+      });
+      filelistEl.appendChild(row);
+    });
+    filelistEl.querySelectorAll('.file-remove').forEach(btn => {
+      btn.addEventListener('click', () => { files.splice(parseInt(btn.dataset.idx, 10), 1); renderList(); resetDownloads(); });
+    });
+    filelistEl.querySelectorAll('.file-move').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.idx, 10);
+        moveFile(idx, btn.dataset.dir === 'up' ? idx - 1 : idx + 1);
+      });
+    });
+  }
+  function addFiles(newFiles) {
+    const pdfFiles = Array.from(newFiles).filter(f => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+    files = manuallyOrdered ? files.concat(sortFiles(pdfFiles)) : sortFiles(files.concat(pdfFiles));
+    renderList(); resetDownloads();
+    statusText.className = 'status-line';
+    statusText.textContent = files.length ? 'Ready to merge ' + files.length + ' files.' : 'Awaiting files.';
+  }
+  function resetDownloads() {
+    downloadCombined.classList.remove('show'); downloadZip.classList.remove('show');
+    continueBox.classList.remove('show'); lastCombinedBytes = null;
+  }
+
+  dropzone.addEventListener('click', () => input.click());
+  input.addEventListener('change', e => { addFiles(e.target.files); input.value = ''; });
+  ['dragenter', 'dragover'].forEach(evt => dropzone.addEventListener(evt, e => { e.preventDefault(); dropzone.classList.add('drag'); }));
+  ['dragleave', 'drop'].forEach(evt => dropzone.addEventListener(evt, e => { e.preventDefault(); dropzone.classList.remove('drag'); }));
+  dropzone.addEventListener('drop', e => { if (e.dataTransfer.files && e.dataTransfer.files.length) addFiles(e.dataTransfer.files); });
+
+  function setProgress(pct) { progressTrack.classList.add('show'); progressFill.style.width = pct + '%'; }
+
+  assembleBtn.addEventListener('click', async () => {
+    if (files.length === 0) return;
+    assembleBtn.disabled = true; resetBtn.style.visibility = 'hidden'; resetDownloads();
+    statusText.className = 'status-line'; statusText.textContent = 'Reading files\u2026'; setProgress(6);
+    try {
+      const named = [];
+      for (let i = 0; i < files.length; i++) {
+        const bytes = await fileToBytes(files[i]);
+        named.push({ name: String(i + 1).padStart(3, '0') + '_' + files[i].name.replace(/\.pdf$/i, '') + '.pdf', bytes });
+        setProgress(6 + Math.round((i / files.length) * 30));
+      }
+      statusText.textContent = 'Merging ' + named.length + ' files\u2026'; setProgress(45);
+      const combinedBytes = await buildCombinedPdf(named.map(n => n.bytes)); setProgress(80);
+      statusText.textContent = 'Preparing individual files\u2026';
+      const zipBlob = await buildZipOfIndividuals(named); setProgress(95);
+
+      setDownload(downloadCombined, new Blob([combinedBytes], { type: 'application/pdf' }), 'Combined.pdf', downloadCombinedLabel, 'Download combined PDF (' + named.length + ' files merged)');
+      setDownload(downloadZip, zipBlob, 'Individual_Pages.zip', downloadZipLabel, 'Download renumbered files (zip, ' + named.length + ')');
+      lastCombinedBytes = combinedBytes;
+      continueBox.classList.add('show');
+
+      setProgress(100);
+      statusText.className = 'status-line success';
+      statusText.textContent = 'Merged successfully \u2014 ' + named.length + ' files, ready below.';
+    } catch (err) {
+      console.error(err);
+      statusText.className = 'status-line error';
+      statusText.textContent = 'The merge failed: ' + err.message;
+    } finally {
+      assembleBtn.disabled = files.length === 0;
+      resetBtn.style.visibility = 'visible';
+      setTimeout(() => { progressTrack.classList.remove('show'); progressFill.style.width = '0%'; }, 1400);
+    }
+  });
+
+  resetBtn.addEventListener('click', () => {
+    files = []; manuallyOrdered = false; renderList(); resetDownloads();
+    statusText.className = 'status-line'; statusText.textContent = 'Awaiting files.';
+  });
+
+  continueBtn.addEventListener('click', () => {
+    if (!lastCombinedBytes) return;
+    sendToImpose(lastCombinedBytes, 'Combined.pdf');
+    switchTab('impose');
+  });
+
+  renderList();
+})();
+
+/* =========================================================================
+   STRUCTURED BIND  (ported from page_weaver.html)
+   ========================================================================= */
+(function () {
+  const state = { cover: null, blank: null, back: null, left: null, right: null, order: 'left-first' };
+  let lastCombinedBytes = null;
+
+  const slotBoxUpdate = (slotEl, file) => {
+    const box = slotEl.querySelector('.slot-box');
+    let fileEl = box.querySelector('.slot-file'), emptyEl = box.querySelector('.slot-empty');
+    if (file) {
+      box.classList.add('has-file');
+      if (emptyEl) emptyEl.remove();
+      if (!fileEl) { fileEl = document.createElement('span'); fileEl.className = 'slot-file'; box.appendChild(fileEl); }
+      fileEl.textContent = file.name;
+    } else {
+      box.classList.remove('has-file');
+      if (fileEl) fileEl.remove();
+      if (!emptyEl) { emptyEl = document.createElement('span'); emptyEl.className = 'slot-empty'; emptyEl.textContent = 'Drop or choose file'; box.appendChild(emptyEl); }
+    }
+  };
+
+  document.querySelectorAll('#sub-structured .slot input[type=file]').forEach(inp => {
+    inp.addEventListener('change', e => {
+      const slotKey = e.target.dataset.slot;
+      const file = e.target.files[0] || null;
+      state[slotKey] = file;
+      slotBoxUpdate(e.target.closest('.slot'), file);
+      updateReadiness();
+    });
+  });
+  document.querySelectorAll('#orderButtons .order-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#orderButtons .order-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.order = btn.dataset.order;
+    });
+  });
+
+  const assembleBtn = $('structAssembleBtn'), statusText = $('structStatus');
+  const progressTrack = $('structProgressTrack'), progressFill = $('structProgressFill');
+  const downloadCombined = $('structDownloadCombined'), downloadCombinedLabel = $('structDownloadCombinedLabel');
+  const downloadZip = $('structDownloadZip'), downloadZipLabel = $('structDownloadZipLabel');
+  const resetBtn = $('structResetBtn');
+  const continueBox = $('structContinueBox'), continueBtn = $('structContinueBtn');
+
+  function updateReadiness() {
+    const ready = !!(state.left && state.right);
+    assembleBtn.disabled = !ready;
+    statusText.className = 'status-line';
+    statusText.textContent = ready ? 'Ready to assemble whenever you are.' : 'Awaiting your two runs of pages.';
+    downloadCombined.classList.remove('show'); downloadZip.classList.remove('show'); continueBox.classList.remove('show');
+  }
+  function setProgress(pct) { progressTrack.classList.add('show'); progressFill.style.width = pct + '%'; }
+
+  assembleBtn.addEventListener('click', async () => {
+    assembleBtn.disabled = true; resetBtn.style.visibility = 'hidden';
+    downloadCombined.classList.remove('show'); downloadZip.classList.remove('show'); continueBox.classList.remove('show');
+    statusText.className = 'status-line'; statusText.textContent = 'Unpacking the runs\u2026'; setProgress(4);
+    try {
+      const [leftPages, rightPages] = await Promise.all([loadZipPages(state.left), loadZipPages(state.right)]);
+      if (leftPages.length === 0 || rightPages.length === 0) throw new Error('One of the runs has no PDF pages inside its .zip.');
+      setProgress(16); statusText.textContent = 'Weaving the sequence\u2026';
+
+      const sequence = [];
+      if (state.cover) sequence.push({ bytes: await fileToBytes(state.cover), rawLabel: 'Cover' });
+      if (state.blank) sequence.push({ bytes: await fileToBytes(state.blank), rawLabel: 'Blank' });
+
+      const maxLen = Math.max(leftPages.length, rightPages.length);
+      const firstIsLeft = state.order === 'left-first';
+      for (let i = 0; i < maxLen; i++) {
+        const l = leftPages[i], r = rightPages[i], num = String(i + 1).padStart(3, '0');
+        if (firstIsLeft) { if (l) sequence.push({ bytes: l, rawLabel: 'Left_' + num }); if (r) sequence.push({ bytes: r, rawLabel: 'Right_' + num }); }
+        else { if (r) sequence.push({ bytes: r, rawLabel: 'Right_' + num }); if (l) sequence.push({ bytes: l, rawLabel: 'Left_' + num }); }
+      }
+      if (state.back) sequence.push({ bytes: await fileToBytes(state.back), rawLabel: 'Back' });
+      sequence.forEach((item, idx) => { item.name = String(idx + 1).padStart(3, '0') + '_' + item.rawLabel + '.pdf'; });
+
+      setProgress(30); statusText.textContent = 'Assembling ' + sequence.length + ' leaves\u2026';
+      const combinedBytes = await buildCombinedPdf(sequence.map(s => s.bytes)); setProgress(75);
+      statusText.textContent = 'Preparing individual pages\u2026';
+      const zipBlob = await buildZipOfIndividuals(sequence.map(s => ({ name: s.name, bytes: s.bytes }))); setProgress(95);
+
+      setDownload(downloadCombined, new Blob([combinedBytes], { type: 'application/pdf' }), 'Combined.pdf', downloadCombinedLabel, 'Download combined PDF (' + sequence.length + ' pages)');
+      setDownload(downloadZip, zipBlob, 'Individual_Pages.zip', downloadZipLabel, 'Download individual pages (zip, ' + sequence.length + ' files)');
+      lastCombinedBytes = combinedBytes;
+      continueBox.classList.add('show');
+
+      setProgress(100);
+      statusText.className = 'status-line success';
+      statusText.textContent = 'Assembled successfully \u2014 ' + sequence.length + ' pages, ready below.';
+    } catch (err) {
+      console.error(err);
+      statusText.className = 'status-line error';
+      statusText.textContent = 'The assembly failed: ' + err.message;
+    } finally {
+      assembleBtn.disabled = false;
+      resetBtn.style.visibility = 'visible';
+      setTimeout(() => { progressTrack.classList.remove('show'); progressFill.style.width = '0%'; }, 1400);
+    }
+  });
+
+  resetBtn.addEventListener('click', () => {
+    Object.keys(state).forEach(k => { if (k !== 'order') state[k] = null; });
+    document.querySelectorAll('#sub-structured .slot input[type=file]').forEach(inp => { inp.value = ''; slotBoxUpdate(inp.closest('.slot'), null); });
+    downloadCombined.classList.remove('show'); downloadZip.classList.remove('show'); continueBox.classList.remove('show');
+    updateReadiness();
+  });
+
+  continueBtn.addEventListener('click', () => {
+    if (!lastCombinedBytes) return;
+    sendToImpose(lastCombinedBytes, 'Combined.pdf');
+    switchTab('impose');
+  });
+
+  updateReadiness();
+})();
+
+/* =========================================================================
+   IMPOSE  (ported from signature_press.html)
+   ========================================================================= */
+const PAPER_SIZES = {
+  letter: { w: 612, h: 792, label: '8.5\u00d711 in' },
+  a4: { w: 595.28, h: 841.89, label: '210\u00d7297 mm' },
+};
+
+let imposeFileBytes = null;
+let imposeFileName = '';
+let imposeSrcMeta = null;
+
+const imposeDrop = $('imposeDrop'), imposeFileInput = $('imposeFileInput');
+const imposeFilenameBox = $('imposeFilenameBox'), imposeFilenameText = $('imposeFilenameText');
+const imposeClearBtn = $('imposeClearBtn');
+const sigSizeInput = $('sigSize'), sigDecBtn = $('sigDec'), sigIncBtn = $('sigInc');
+const sheetSizeSel = $('sheetSize'), padBlankChk = $('padBlank'), showCutlineChk = $('showCutline');
+const imposeGoBtn = $('imposeGoBtn'), imposeMessagesEl = $('imposeMessages'), stampEl = $('stamp');
+const tPages = $('tPages'), tPad = $('tPad'), tSigs = $('tSigs'), tSheets = $('tSheets');
+
+imposeDrop.addEventListener('click', () => imposeFileInput.click());
+imposeDrop.addEventListener('dragover', e => { e.preventDefault(); imposeDrop.classList.add('drag'); });
+imposeDrop.addEventListener('dragleave', () => imposeDrop.classList.remove('drag'));
+imposeDrop.addEventListener('drop', e => {
+  e.preventDefault(); imposeDrop.classList.remove('drag');
+  if (e.dataTransfer.files && e.dataTransfer.files[0]) handleImposeFile(e.dataTransfer.files[0]);
+});
+imposeFileInput.addEventListener('change', e => { if (e.target.files && e.target.files[0]) handleImposeFile(e.target.files[0]); });
+imposeClearBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  imposeFileBytes = null; imposeSrcMeta = null; imposeFileName = '';
+  imposeFileInput.value = '';
+  imposeFilenameBox.style.display = 'none';
+  imposeDrop.style.display = 'block';
+  updateTicket();
+});
+
+async function handleImposeFile(file) {
+  if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+    showImposeMessage('err', 'That file doesn\u2019t look like a PDF.');
+    return;
+  }
+  imposeFileName = file.name;
+  imposeFileBytes = new Uint8Array(await file.arrayBuffer());
+  await loadImposeMeta();
+}
+async function loadImposeMeta() {
+  const { PDFDocument } = PDFLib;
+  try {
+    const doc = await PDFDocument.load(imposeFileBytes);
+    const count = doc.getPageCount();
+    const first = doc.getPage(0);
+    imposeSrcMeta = { pageCount: count, pw: first.getWidth(), ph: first.getHeight() };
+  } catch (err) {
+    showImposeMessage('err', 'Couldn\u2019t read that PDF \u2014 it may be encrypted or corrupted.');
+    imposeFileBytes = null; imposeSrcMeta = null;
+    return;
+  }
+  imposeFilenameText.textContent = imposeFileName + '  \u00b7  ' + imposeSrcMeta.pageCount + ' pages';
+  imposeFilenameBox.style.display = 'flex';
+  imposeDrop.style.display = 'none';
+  updateTicket();
+}
+
+// called by the "Use this PDF for imposition" links in the Assemble tab
+async function sendToImpose(bytes, name) {
+  imposeFileName = name;
+  imposeFileBytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  await loadImposeMeta();
+}
+
+function clampSigSize() {
+  let v = parseInt(sigSizeInput.value, 10);
+  if (isNaN(v) || v < 4) v = 4;
+  v = Math.round(v / 4) * 4;
+  sigSizeInput.value = v;
+}
+sigDecBtn.addEventListener('click', () => { clampSigSize(); sigSizeInput.value = Math.max(4, parseInt(sigSizeInput.value, 10) - 4); updateTicket(); });
+sigIncBtn.addEventListener('click', () => { clampSigSize(); sigSizeInput.value = parseInt(sigSizeInput.value, 10) + 4; updateTicket(); });
+sigSizeInput.addEventListener('change', () => { clampSigSize(); updateTicket(); });
+sheetSizeSel.addEventListener('change', updateTicket);
+padBlankChk.addEventListener('change', updateTicket);
+
+function showImposeMessage(kind, text) { imposeMessagesEl.innerHTML = '<div class="note ' + kind + '">' + text + '</div>'; }
+function clearImposeMessage() { imposeMessagesEl.innerHTML = ''; }
+
+function updateTicket() {
+  if (!imposeSrcMeta) {
+    stampEl.textContent = 'no file yet';
+    tPages.textContent = '\u2014'; tPad.textContent = '\u2014'; tSigs.textContent = '\u2014'; tSheets.textContent = '\u2014';
+    imposeGoBtn.disabled = true; imposeGoBtn.textContent = 'Choose a PDF to begin';
+    clearImposeMessage();
+    return;
+  }
+  clampSigSize();
+  const sigSize = parseInt(sigSizeInput.value, 10);
+  const total = imposeSrcMeta.pageCount;
+  let pad = 0;
+  const remainder = total % sigSize;
+  if (remainder !== 0) pad = sigSize - remainder;
+
+  tPages.textContent = total;
+
+  if (pad > 0 && !padBlankChk.checked) {
+    tPad.textContent = '\u2014'; tSigs.textContent = '\u2014'; tSheets.textContent = '\u2014';
+    stampEl.textContent = 'won\u2019t divide evenly';
+    showImposeMessage('err', total + ' pages doesn\u2019t divide evenly into ' + sigSize + '-page signatures (' + pad + ' short). Either check \u201cpad with blank pages,\u201d or pick a different signature size.');
+    imposeGoBtn.disabled = true; imposeGoBtn.textContent = 'Fix signature size to continue';
+    return;
+  }
+
+  const finalTotal = total + pad;
+  const numSigs = finalTotal / sigSize;
+  const sheetsPerSig = sigSize / 4;
+  const totalSheets = numSigs * sheetsPerSig;
+  const physicalPapers = Math.ceil(totalSheets / 2);
+
+  tPad.textContent = pad;
+  tSigs.textContent = numSigs;
+  tSheets.textContent = physicalPapers + ' (' + PAPER_SIZES[sheetSizeSel.value].label + ')';
+  stampEl.textContent = 'ready';
+
+  clearImposeMessage();
+  if (pad > 0) showImposeMessage('warn', 'Adding ' + pad + ' blank page' + (pad > 1 ? 's' : '') + ' at the end to complete the last signature.');
+  if (sheetsPerSig % 2 !== 0) {
+    const w = document.createElement('div');
+    w.className = 'note warn';
+    w.textContent = 'With ' + sigSize + ' pages per signature, signatures use an odd number of sheets, so paper sheets won\u2019t line up one-per-signature as neatly. 8 pages per signature avoids this.';
+    imposeMessagesEl.appendChild(w);
+  }
+
+  imposeGoBtn.disabled = false;
+  imposeGoBtn.textContent = 'Generate imposed PDF';
+}
+
+imposeGoBtn.addEventListener('click', async () => {
+  if (!imposeFileBytes || !imposeSrcMeta) return;
+  imposeGoBtn.disabled = true;
+  const prevLabel = imposeGoBtn.textContent;
+  imposeGoBtn.textContent = 'Building\u2026';
+  try {
+    await generateImposedPdf();
+    imposeGoBtn.textContent = 'Downloaded \u2713';
+    setTimeout(() => { imposeGoBtn.textContent = prevLabel; imposeGoBtn.disabled = false; }, 1800);
+  } catch (err) {
+    console.error(err);
+    showImposeMessage('err', 'Something went wrong building the PDF: ' + err.message);
+    imposeGoBtn.textContent = prevLabel;
+    imposeGoBtn.disabled = false;
+  }
+});
+
+async function generateImposedPdf() {
+  const { PDFDocument } = PDFLib;
+  const sigSize = parseInt(sigSizeInput.value, 10);
+  const total = imposeSrcMeta.pageCount;
+  const remainder = total % sigSize;
+  const pad = remainder === 0 ? 0 : sigSize - remainder;
+  const finalTotal = total + pad;
+  const paper = PAPER_SIZES[sheetSizeSel.value];
+  const LETTER_W = paper.w, LETTER_H = paper.h;
+  const halfH = LETTER_H / 2;
+
+  const outDoc = await PDFDocument.create();
+
+  let workingBytes = imposeFileBytes;
+  if (pad > 0) {
+    const padded = await PDFDocument.load(imposeFileBytes);
+    for (let i = 0; i < pad; i++) padded.addPage([imposeSrcMeta.pw, imposeSrcMeta.ph]);
+    workingBytes = await padded.save();
+  }
+
+  const embeddedPages = await outDoc.embedPdf(workingBytes, Array.from({ length: finalTotal }, (_, i) => i));
+
+  const pw = imposeSrcMeta.pw, ph = imposeSrcMeta.ph;
+  const sheetW = pw * 2, sheetH = ph;
+  const scale = Math.min(LETTER_W / sheetW, halfH / sheetH);
+  const scaledW = sheetW * scale, scaledH = sheetH * scale;
+  const xOffset = (LETTER_W - scaledW) / 2;
+
+  const numSigs = finalTotal / sigSize;
+  const sheets = [];
+  for (let sig = 0; sig < numSigs; sig++) {
+    const start = sig * sigSize;
+    const sheetsInSig = sigSize / 4;
+    for (let i = 1; i <= sheetsInSig; i++) {
+      const n = sigSize;
+      const frontLeftLocal = n - 2 * i + 2;
+      const frontRightLocal = 2 * i - 1;
+      const backLeftLocal = 2 * i;
+      const backRightLocal = n - 2 * i + 1;
+      sheets.push({
+        front: [embeddedPages[start + frontLeftLocal - 1], embeddedPages[start + frontRightLocal - 1]],
+        back: [embeddedPages[start + backLeftLocal - 1], embeddedPages[start + backRightLocal - 1]],
+      });
+    }
+  }
+
+  function drawHalf(page, pair, isTop) {
+    if (!pair) return;
+    const yBase = isTop ? halfH : 0;
+    const yOffset = yBase + (halfH - scaledH) / 2;
+    page.drawPage(pair[0], { x: xOffset, y: yOffset, width: pw * scale, height: ph * scale });
+    page.drawPage(pair[1], { x: xOffset + pw * scale, y: yOffset, width: pw * scale, height: ph * scale });
+  }
+  function drawCutLine(page) {
+    const dash = 5, gap = 3.5;
+    let x = 0;
+    while (x < LETTER_W) {
+      page.drawLine({
+        start: { x: x, y: halfH }, end: { x: Math.min(x + dash, LETTER_W), y: halfH },
+        thickness: 0.75, color: PDFLib.rgb(0.63, 0.24, 0.24), opacity: 0.55,
+      });
+      x += dash + gap;
+    }
+  }
+
+  for (let k = 0; k < sheets.length; k += 2) {
+    const s1 = sheets[k], s2 = sheets[k + 1] || null;
+    const frontPage = outDoc.addPage([LETTER_W, LETTER_H]);
+    drawHalf(frontPage, s1.front, true);
+    if (s2) drawHalf(frontPage, s2.front, false);
+    if (showCutlineChk.checked) drawCutLine(frontPage);
+
+    const backPage = outDoc.addPage([LETTER_W, LETTER_H]);
+    drawHalf(backPage, s1.back, true);
+    if (s2) drawHalf(backPage, s2.back, false);
+    if (showCutlineChk.checked) drawCutLine(backPage);
+  }
+
+  const outBytes = await outDoc.save();
+  const blob = new Blob([outBytes], { type: 'application/pdf' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const base = imposeFileName.replace(/\.pdf$/i, '');
+  a.href = url; a.download = base + '_signatures.pdf';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+updateTicket();
+</script>
+</body>
+</html>
